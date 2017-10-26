@@ -1,0 +1,105 @@
+.Dd July 22, 2016
+.Dt MVI 1
+.Os
+.Sh NAME
+.Nm mvi
+.Nd vi-like mail interface
+.Sh DESCRIPTION
+.Nm
+is nice.
+.Sh VI COMMANDS
+The follwing commands are available in normal mode.
+.Bl -tag -width Ds
+.It Sy [n] <control-B>
+Move
+.Ar n
+pages backwards.
+.It Sy [n] <control-E>
+Scroll
+.Ar n
+lines forwards.
+.It Sy [n] <control-F>
+Move
+.Ar n
+pages forwards.
+.It Sy [n] <control-Y>
+Scroll
+.Ar n
+lines backwards.
+.It Sy [n] <enter>
+.It Sy [n] +
+.It Sy [n] j
+Move the cursor
+.Ar n
+lines down.
+.It Sy [n] -
+.It Sy [n] k
+Move the cursor
+.Ar n
+lines up.
+.It Sy <escape>
+Return into default mode.
+.It Sy [n] [[
+Move
+.Ar n
+times to the next parent message.
+.It Sy [n] ]]
+Move
+.Ar n
+times to the next child message.
+.It Sy [n] \&(
+Todo
+.Ar n .
+.It Sy [n] \&)
+Todo
+.Ar n .
+.It Sy [n] {
+Move
+.Ar n
+threads backward.
+.It Sy [n] }
+Move
+.Ar n
+threads forward.
+.El
+.Sh VI TEXT INPUT COMMANDS
+The following key bindings are available in the text input mode.
+.Bl -tag -width Ds
+.It Sy <erase>
+.It Sy <control-H>
+Erase the last character.
+.It Sy <escape>
+Return to command mode.
+.It Sy <control-W>
+Erase the last word.
+.It Sy <control-U>
+Erase entire input line.
+.El
+.Sh EX COMMANDS
+.Bl -tag -width Ds
+.It Sy \&! cmd [args...]
+Execute a shell command.
+.It Sy q[uit][!]
+Exit
+.Nm .
+.It Sy =
+Output the current line number.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh SEE ALSO
+.Xr ed 1 ,
+.Xr vi 1 ,
+.Xr vim 1
+.Sh AUTHORS
+.An Duncan Overbruck Aq Mt mail@duncano.de
+.Sh LICENSE
+.Nm
+is in the public domain.
+.Pp
+To the extent possible under law,
+the creator of this work
+has waived all copyright and related or
+neighboring rights to this work.
+.Pp
+.Lk http://creativecommons.org/publicdomain/zero/1.0/
