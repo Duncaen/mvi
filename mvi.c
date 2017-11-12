@@ -68,6 +68,10 @@ static int mod;
 static int xrow;
 static int xtop;
 
+static int orow;
+static int nrow;
+static int mv;
+
 static int nlen;
 
 static int quit = 0;
@@ -111,70 +115,86 @@ enum mapype {
 	MAP_CHILD,
 };
 
-struct keyarg {
-	char key[128];
-	int pos;
+enum keystate {
+	KEY_MOTION = 1,
+	KEY_OP,
 };
+
+typedef struct keynode KeyNode;
+typedef struct keyarg KeyArg;
 
 struct keynode {
 	int t;
 	char key;
+	int op;
 	union {
 		char *cmd;
 		int i;
 		char *s;
-		int (*fn)(struct keyarg *);
-		struct keynode *childs;
+		int (*fn)(KeyArg *);
+		KeyNode *childs;
 	};
 };
 
+struct keyarg {
+	char key[128];
+	int pos;
+	int state;
+	KeyNode *opnode;
+};
+
 #define MAP_NULL	{ 0 }
-#define MAP_CMD(x, y)	{ MAP_CMD, x, {.cmd=(y)} }
-#define MAP_FUN(x, y)	{ MAP_FN, x, {.fn=(y)} }
-#define MAP_SUB(x, ...)	{ MAP_CHILD, x, {.childs=(struct keynode[]){__VA_ARGS__}} }
+#define MAP_CMD(x, y, z)	{ MAP_CMD, x, y, {.cmd=(z)} }
+#define MAP_FUN(x, y, z)	{ MAP_FN, x, y, {.fn=(z)} }
+#define MAP_SUB(x, ...)	{ MAP_CHILD, x, 0, {.childs=(KeyNode[]){__VA_ARGS__}} }
 
-static int ui_excmd(struct keyarg *);
-static int ui_search(struct keyarg *);
-static int ui_null(struct keyarg *);
+static int ui_excmd(KeyArg *);
+static int ui_search(KeyArg *);
+static int ui_null(KeyArg *);
 
-static int ui_null(struct keyarg *_) { return 1;};
+static int ui_null(KeyArg *_) { (void)(_); return 1;};
 
-static struct keynode keytree[] = {
+static KeyNode keytree[] = {
 	MAP_SUB(TK_ESC,
 		// ^[[A -- arrow up
 		// ^[[B -- arrow down
 		// ^[[5 -- page up
 		// ^[[6 -- page down
 		MAP_SUB('[',
-			MAP_CMD('A', "prev"),
-			MAP_CMD('B', "next"),
-			MAP_CMD('5', "back"),
-			MAP_CMD('6', "forw"),
+			MAP_CMD('A', 0, "-"),
+			MAP_CMD('B', 0, "+"),
+			MAP_CMD('5', 0, "back"),
+			MAP_CMD('6', 0, "forw"),
 			{0}
 		),
 	),
-	MAP_CMD('j', "next"),
-	MAP_CMD('k', "prev"),
-	MAP_FUN(':', ui_excmd),
-	MAP_FUN('/', ui_search),
-	MAP_FUN('?', ui_search),
-	MAP_FUN('n', ui_search),
-	MAP_FUN('N', ui_search),
-	MAP_FUN(TK_CTL('z'), ui_null),
-	MAP_FUN(TK_CTL('b'), ui_null),
-	MAP_FUN(TK_CTL('f'), ui_null),
-	MAP_FUN(TK_CTL('e'), ui_null),
-	MAP_FUN(TK_CTL('y'), ui_null),
+	MAP_CMD('p', KEY_OP, "w !mshow"),
+	MAP_CMD('d', KEY_OP, "!mflag -vS"),
+	MAP_CMD('u', KEY_OP, "!mflag -vs"),
+	MAP_CMD('t', KEY_OP, "!mflag -vt"),
+	MAP_CMD('T', KEY_OP, "!mflag -vT"),
+	MAP_CMD('j', KEY_MOTION, "+"),
+	MAP_CMD('k', KEY_MOTION, "-"),
+	MAP_FUN(':', 0, ui_excmd),
+	MAP_FUN('/', KEY_MOTION, ui_search),
+	MAP_FUN('?', KEY_MOTION, ui_search),
+	MAP_FUN('n', KEY_MOTION, ui_search),
+	MAP_FUN('N', KEY_MOTION, ui_search),
+	MAP_FUN(TK_CTL('z'), 0, ui_null),
+	MAP_FUN(TK_CTL('b'), 0, ui_null),
+	MAP_FUN(TK_CTL('f'), 0, ui_null),
+	MAP_FUN(TK_CTL('e'), 0, ui_null),
+	MAP_FUN(TK_CTL('y'), 0, ui_null),
 	MAP_SUB('o', 
-		MAP_CMD('t', "%!mthread"),
-		MAP_CMD('T', "%!sed 's/^[ ]*//'"),
+		MAP_CMD('t', 0, "%!mthread"),
+		MAP_CMD('T', 0, "%!sed 's/^[ ]*//'"),
 		{0}
 	),
 	MAP_SUB('s',
-		MAP_CMD('d', "%!msort -d"),
-		MAP_CMD('D', "%!msort -rd"),
-		MAP_CMD('s', "%!msort -s"),
-		MAP_CMD('S', "%!msort -rs"),
+		MAP_CMD('d', 0, "%!msort -d"),
+		MAP_CMD('D', 0, "%!msort -rd"),
+		MAP_CMD('s', 0, "%!msort -s"),
+		MAP_CMD('S', 0, "%!msort -rs"),
 		{0}
 	),
 	{0}
@@ -937,13 +957,21 @@ ex_command(char *s)
 		arg.r1 = r1 ? MIN(MAX(r1, 1), num) : 0;
 		arg.r2 = r2 ? MIN(MAX(r2, 1), num) : 0;
 
-		fprintf(stderr, "ex_command: %s\n", p);
+		fprintf(stderr, "ex_command: %s r1=%d r2=%d\n", p, arg.r1, arg.r2);
 		p1 = p;
 		while (isspace(*p1) || isalpha(*p1))
 			p1++;
 		if (*p1 == '!')
 			p1++;
-		if (p1-p > sizeof buf)
+		if (p1 == p && *p1 == 0) {
+			// no command, do a motion
+			nrow = MAX(arg.r1, arg.r2);
+			nrow = MAX(MIN(nrow - 1, num - 1), 0);
+			fprintf(stderr, "ex_command: motion nrow=%d\n", nrow);
+			mv = 1;
+			return 0;
+		}
+		if ((size_t)(p1-p) > sizeof buf)
 			return 1;
 		strncpy(buf, p, p1-p);
 		arg.cmd = buf;
@@ -971,10 +999,10 @@ static char *search_kwd;
 static int search_dir;
 
 static int
-vi_search(int cmd, int cnt, int *row)
+vi_search(int cmd, int cnt)
 {
 	int i, j, dir;
-	int res = *row;
+	int res = nrow;
 
 	if (cmd == '/' || cmd == '?') {
 		char sign[2] = { cmd, 0 };
@@ -1000,7 +1028,7 @@ vi_search(int cmd, int cnt, int *row)
 
 	dir = cmd == 'N' ? -search_dir : search_dir;
 	for (i = 0; i < cnt; i++) {
-		for (j = res ? res : *row; j >= 0 && j < num; j += dir)
+		for (j = res ? res : nrow; j >= 0 && j < num; j += dir)
 			if (regexec(&pattern, mails[j].scan, 0, 0, 0) == 0)
 				if (j != res) {
 					res = j;
@@ -1011,7 +1039,8 @@ vi_search(int cmd, int cnt, int *row)
 	}
 
 	if (res) {
-		*row = res;
+		nrow = res;
+		mv = 1;
 		return 0;
 	}
 		
@@ -1023,16 +1052,10 @@ int
 scan(int r1, int r2)
 {
 	int i;
-	struct sbuf *ibuf = sbuf_make();
 	char *input, *output, *error;
 	size_t inlen, outlen, errlen;
 
-	for (i = r1; i <= r2 && i < num; i++) {
-		sbuf_str(ibuf, mails[i].file);
-		sbuf_chr(ibuf, '\n');
-	}
-	
-	inlen = sbuf_done(ibuf, &input);
+	inlen = seq_get(&input, r1, r2);
 	cmd_pipe(mscan_argv, input, inlen, &output, &outlen, &error, &errlen);
 
 	i = r1;
@@ -1045,103 +1068,6 @@ scan(int r1, int r2)
 	}
 
 	return 0;
-}
-
-static int
-vi_motionln(int *row, int cmd)
-{
-	int cnt = (vi_arg1 ? vi_arg1 : 1) * (vi_arg2 ? vi_arg2 : 1);
-	int c = vi_read();
-	switch (c) {
-	case '+':
-	case '\n':
-	case 'j':
-		*row = MIN(*row + cnt, num - 1);
-		break;
-	case '-':
-	case 'k':
-		*row = MAX(*row - cnt, 0);
-		break;
-	case 'G':
-		*row = (vi_arg1 || vi_arg2) ? cnt - 1 : num - 1;
-		break;
-	default:
-		if (c == cmd) {
-			 *row = MIN(*row + cnt - 1, num - 1);
-			 break;
-		}
-		vi_back(c);
-		return 0;
-	}
-	return c;
-}
-
-static int
-vi_motion(int *row, int *off)
-{
-	int cnt = (vi_arg1 ? vi_arg1 : 1) * (vi_arg2 ? vi_arg2 : 1);
-	int i, j;
-	int mv;
-	if ((mv = vi_motionln(row, 0))) {
-		*off = -1;
-		return mv;
-	}
-	mv = vi_read();
-	switch (mv) {
-	case '[':
-		fprintf(stderr, "hmm\n");
-		if (vi_read() != '[')
-			return -1;
-		for (i = 0; i < cnt; i++) {
-			for (j = *row; j >= 0; j--)
-				if (mails[*row].depth > mails[j].depth) {
-					*row = j > num ? num : j;
-					break;
-				} else if (mails[*row].depth < mails[j].depth) {
-					break;
-				}
-		}
-		break;
-	case ']':
-		fprintf(stderr, "hmm1\n");
-		if (vi_read() != ']')
-			return -1;
-		for (i = 0; i < cnt; i++) {
-			for (j = *row; j < num; j++) {
-				/* fprintf(stderr, "]: dr=%ld di=%ld\n", mails[*row].depth, mails[i].depth); */
-				if (mails[*row].depth < mails[j].depth) {
-					*row = j > num ? num : j;
-					break;
-				} else if (mails[*row].depth > mails[j].depth) {
-					break;
-				}
-			}
-		}
-		break;
-	case '{':
-		for (i = *row-1; i >= 0; i--)
-			if (*mails[i].file != ' ' && --cnt == 0)
-				break;
-		*row = i == 0 ? 0 : i;
-		break;
-	case '}':
-		for (i = *row+2; i < num; i++)
-			if (*mails[i].file != ' ' && --cnt == 0)
-				break;
-		*row = i == num ? num : i;
-		break;
-	case '/':
-	case '?':
-	case 'n':
-	case 'N':
-		if (vi_search(mv, cnt, row))
-			return -1;
-		break;
-	default:
-		vi_back(mv);
-		return 0;
-	}
-	return mv;
 }
 
 static int
@@ -1218,28 +1144,6 @@ m_pipe(int r1, int r2, char *cmd)
 	return r;
 }
 
-static int
-vc_motion(int c)
-{
-	int mv;
-	int r1 = xrow, r2 = xrow;
-
-	vi_arg2 = vi_prefix();
-	if (vi_arg2 < 0)
-		return 1;
-
-	if ((mv = vi_motionln(&r2, c))) {
-		//o2 = -1;
-	} else if (!(mv = vi_motion(&r2, 0))) {
-		/* vi_read(); */
-		return 1;
-	}
-	if (mv < 0)
-		return 1;
-
-	return 1;
-}
-
 void
 draw_row(int row)
 {
@@ -1278,7 +1182,7 @@ draw_row(int row)
 void
 vi_wait()
 {
-	char c;
+	int c;
 	if (printed >= 1) {
 		term_pos(xrows, 0);
 		term_kill();
@@ -1359,7 +1263,7 @@ vi_scrollbackward(int cnt)
 }
 
 static int
-ui_excmd(struct keyarg *arg)
+ui_excmd(KeyArg *arg)
 {
 	char *cmd;
 	int r;
@@ -1373,44 +1277,83 @@ ui_excmd(struct keyarg *arg)
 }
 
 static int
-ui_search(struct keyarg *arg)
+ui_search(KeyArg *arg)
 {
 	int cnt = (vi_arg1 ? vi_arg1 : 1) * (vi_arg2 ? vi_arg2 : 1);
-	if (vi_search(*arg->key, cnt, xrow-1))
+	if (vi_search(*arg->key, cnt))
 		return 1; 
 	return 0;
 }
 
 static int
-match_tree(struct keynode *node, struct keyarg *arg)
+match_tree(KeyNode *node, KeyArg *arg)
 {
+	KeyNode *n;
 	size_t i;
 	int c = vi_read();
+	int r;
+	int r1, r2;
 	arg->key[arg->pos++] = c;
 	if (TK_INT(c)) {
 		return match_tree(keytree[0].childs, arg);
 	}
 	fprintf(stderr, "match_tree: c=%d\n",c);
 	for (i = 0; ; i++) {
-		if (node[i].key == 0) break;
-		if (node[i].key != c) continue;
-		if (node[i].t == MAP_CHILD) {
-			return match_tree(node[i].childs, arg);
-		} else {
-			fprintf(stderr, "matched: %s\n", node[i].cmd);
-			switch (node[i].t) {
+		n = &node[i];
+		if (n->key == 0) break;
+		if (n->key != c) continue;
+		if (n->t == MAP_CHILD)
+			return match_tree(n->childs, arg);
+		if (arg->state == KEY_OP && arg->opnode->key == c) {
+			// pressed op key two times
+			fprintf(stderr, "match_tree: run op %c on current mail\n", c);
+			goto doop;
+		}
+		if (n->op == KEY_OP) {
+			arg->state = KEY_OP;
+			arg->opnode = n;
+			return match_tree(keytree, arg);
+		}
+		fprintf(stderr, "matched: %c\n", c);
+		switch (n->t) {
+		case MAP_CMD:
+			r = ex_command(n->cmd);
+			break;
+		case MAP_FN:
+			r = n->fn(arg);
+			break;
+		default:
+			return 1;
+		}
+		if (r) return 1;
+		if (arg->state == KEY_OP) {
+doop:
+			// XXX: add count/prefix
+			r1 = r2 = xrow;
+			if (mv) {
+				if (nrow < r1) r1 = nrow;
+				else r2 = nrow;
+			}
+			n = arg->opnode;
+			char buf[1024];
+			switch (n->t) {
 			case MAP_CMD:
-				return ex_command(node[i].cmd);
+				// XXX: wew range to string just to convert it back, need a better solution
+				snprintf(buf, sizeof buf, "%d:%d%s", r1, r2, n->cmd);
+				return ex_command(buf);
 			case MAP_FN:
-				return node[i].fn(arg);
+				return n->fn(arg);
+			default:
+				return 1;
 			}
 		}
+		return 0;
 	}
-	/* vi_back(c); */
 	return 1;
 }
 
-int main(int argc, char *argv[])
+int
+main(int argc, char *argv[])
 {
 	int c;
 
@@ -1442,72 +1385,22 @@ int main(int argc, char *argv[])
 	draw_again(0);
 	term_pos(xrow - xtop, 0);
 
-	char *cmd;
-	struct keyarg karg;
+	KeyArg karg;
 	while (!quit) {
-		mod = 0;
 		karg.pos = 0;
-		int mv;
+		karg.state = 0;
+		mv = 0;
+		mod = 0;
 		int otop = xtop;
-		int nrow = xrow;
-		int orow = xrow;
-		int noff = 0;
+		nrow = xrow;
+		orow = xrow;
 		vi_arg2 = 0;
 		vi_arg1 = vi_prefix();
-		mv = vi_motion(&nrow, &noff);
-		if (mv > 0) {
-			xrow = nrow;
-		} else if (mv == 0) {
-			char c = vi_read();
-			switch (c) {
-#if 0
-			case TK_CTL('b'):
-				if (vi_scrollbackward(MAX(1, vi_arg1) * (xrows - 1)))
-					break;
-				break;
-			case TK_CTL('f'):
-				if (vi_scrollforeward(MAX(1, vi_arg1) * (xrows - 1)))
-					break;
-				break;
-			case TK_CTL('e'):
-				if (vi_scrollforeward(MAX(1, vi_arg1)))
-					break;
-				break;
-			case TK_CTL('y'):
-				if (vi_scrollbackward(MAX(1, vi_arg1)))
-					break;
-				break;
-			case TK_CTL('z'):
-				term_pos(xrows, 0);
-				term_suspend();
-				mod = 1;
-				break;
-			case ':':
-				cmd = vi_prompt(":", 0);
-				if (cmd) {
-					ex_command(cmd);
-					mod = 1;
-				}
-				free(cmd);
-				if (quit)
-					continue;
-				break;
-			case 'P':
-				vi_back('p');
-				vc_motion('p');
-				mod = 1;
-				break;
-#endif
-			default:
-				vi_back(c);
-				if (!match_tree(keytree, &karg))
-					break;
-				if (!vc_motion(c)) {
-					mod = 1;
-					break;
-				}
 
-			}
+		if (!match_tree(keytree, &karg)) {
+			fprintf(stderr, "match_tree: done mv=%d nrow=%d\n", mv, nrow);
+			if (mv) xrow = nrow;
+			mod = 1;
 		}
 
 		if (xrow < 0 || xrow >= num)
@@ -1539,7 +1432,6 @@ int main(int argc, char *argv[])
 	term_pos(xrows, 0);
 	term_kill();
 	term_done();
-
 
 	return 0;
 }
