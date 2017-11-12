@@ -115,6 +115,15 @@ enum mapype {
 	MAP_CHILD,
 };
 
+enum {
+	SEARCH_UP = 1,
+	SEARCH_DOWN,
+	SCROLL_UP,
+	SCROLL_DOWN,
+	SCROLL_PAGE_UP,
+	SCROLL_PAGE_DOWN,
+};
+
 enum keystate {
 	KEY_MOTION = 1,
 	KEY_OP,
@@ -131,7 +140,12 @@ struct keynode {
 		char *cmd;
 		int i;
 		char *s;
-		int (*fn)(KeyArg *);
+		struct {
+			int (*fn)(KeyArg *, void *);
+			union {
+				int i;
+			} arg;
+		};
 		KeyNode *childs;
 	};
 };
@@ -143,16 +157,18 @@ struct keyarg {
 	KeyNode *opnode;
 };
 
-#define MAP_NULL	{ 0 }
+#define MAP_NULL	{ 0,0,0,{0} }
 #define MAP_CMD(x, y, z)	{ MAP_CMD, x, y, {.cmd=(z)} }
-#define MAP_FUN(x, y, z)	{ MAP_FN, x, y, {.fn=(z)} }
+#define MAP_FUN(x, y, z, a)	{ MAP_FN, x, y, {.fn=(z),a } }
 #define MAP_SUB(x, ...)	{ MAP_CHILD, x, 0, {.childs=(KeyNode[]){__VA_ARGS__}} }
 
-static int ui_excmd(KeyArg *);
-static int ui_search(KeyArg *);
-static int ui_null(KeyArg *);
+static int ui_excmd(KeyArg *, void *);
+static int ui_search(KeyArg *, void *);
+static int ui_scroll(KeyArg *, void *);
+static int ui_suspend(KeyArg *, void *);
+static int ui_null(KeyArg *, void *);
 
-static int ui_null(KeyArg *_) { (void)(_); return 1;};
+static int ui_null(KeyArg *_, void *__) { (void)(_); (void)(__); return 1;};
 
 static KeyNode keytree[] = {
 	MAP_SUB(TK_ESC,
@@ -165,7 +181,7 @@ static KeyNode keytree[] = {
 			MAP_CMD('B', 0, "+"),
 			MAP_CMD('5', 0, "back"),
 			MAP_CMD('6', 0, "forw"),
-			{0}
+			MAP_NULL
 		),
 	),
 	MAP_CMD('p', KEY_OP, "w !mshow"),
@@ -175,29 +191,29 @@ static KeyNode keytree[] = {
 	MAP_CMD('T', KEY_OP, "!mflag -vT"),
 	MAP_CMD('j', KEY_MOTION, "+"),
 	MAP_CMD('k', KEY_MOTION, "-"),
-	MAP_FUN(':', 0, ui_excmd),
-	MAP_FUN('/', KEY_MOTION, ui_search),
-	MAP_FUN('?', KEY_MOTION, ui_search),
-	MAP_FUN('n', KEY_MOTION, ui_search),
-	MAP_FUN('N', KEY_MOTION, ui_search),
-	MAP_FUN(TK_CTL('z'), 0, ui_null),
-	MAP_FUN(TK_CTL('b'), 0, ui_null),
-	MAP_FUN(TK_CTL('f'), 0, ui_null),
-	MAP_FUN(TK_CTL('e'), 0, ui_null),
-	MAP_FUN(TK_CTL('y'), 0, ui_null),
+	MAP_FUN(':', 0, ui_excmd, {0}),
+	MAP_FUN('/', KEY_MOTION, ui_search, {.i=SEARCH_DOWN}),
+	MAP_FUN('?', KEY_MOTION, ui_search, {.i=SEARCH_UP}),
+	MAP_FUN('n', KEY_MOTION, ui_search, {.i=SEARCH_DOWN}),
+	MAP_FUN('N', KEY_MOTION, ui_search, {.i=SEARCH_UP}),
+	MAP_FUN(TK_CTL('z'), 0, ui_suspend, {0}),
+	MAP_FUN(TK_CTL('b'), 0, ui_scroll, {.i=SCROLL_PAGE_UP}),
+	MAP_FUN(TK_CTL('f'), 0, ui_scroll, {.i=SCROLL_PAGE_DOWN}),
+	MAP_FUN(TK_CTL('e'), 0, ui_scroll, {.i=SCROLL_DOWN}),
+	MAP_FUN(TK_CTL('y'), 0, ui_scroll, {.i=SCROLL_UP}),
 	MAP_SUB('o', 
 		MAP_CMD('t', 0, "%!mthread"),
 		MAP_CMD('T', 0, "%!sed 's/^[ ]*//'"),
-		{0}
+		MAP_NULL
 	),
 	MAP_SUB('s',
 		MAP_CMD('d', 0, "%!msort -d"),
 		MAP_CMD('D', 0, "%!msort -rd"),
 		MAP_CMD('s', 0, "%!msort -s"),
 		MAP_CMD('S', 0, "%!msort -rs"),
-		{0}
+		MAP_NULL
 	),
-	{0}
+	MAP_NULL
 };
 
 static int m_pipe(int, int, char *);
@@ -460,6 +476,9 @@ cmd_pipe(char *argv[],
 	int ifd = -1, ofd = -1, efd = -1;
 	int r = 0;
 
+	obuf = 0;
+	ebuf = 0;
+
 	pid = cmd_exec(argv,
 	    input ? &ifd : 0,
 	    output ? &ofd : 0,
@@ -671,7 +690,7 @@ void
 term_suspend()
 {
 	term_done();
-	kill(getpid(), SIGSTOP);
+	kill(getpid(), SIGTSTP);
 	term_init();
 }
 
@@ -1263,7 +1282,7 @@ vi_scrollbackward(int cnt)
 }
 
 static int
-ui_excmd(KeyArg *arg)
+ui_excmd(KeyArg *karg, void *arg)
 {
 	char *cmd;
 	int r;
@@ -1277,12 +1296,41 @@ ui_excmd(KeyArg *arg)
 }
 
 static int
-ui_search(KeyArg *arg)
+ui_search(KeyArg *karg, void *arg)
 {
 	int cnt = (vi_arg1 ? vi_arg1 : 1) * (vi_arg2 ? vi_arg2 : 1);
-	if (vi_search(*arg->key, cnt))
+	if (vi_search(*karg->key, cnt))
 		return 1; 
 	return 0;
+}
+
+static int
+ui_suspend(KeyArg *karg, void *arg)
+{
+	(void)karg;
+	(void)arg;
+	term_pos(xrows, 0);
+	term_suspend();
+	mod = 1;
+	return 0;
+}
+
+static int
+ui_scroll(KeyArg *karg, void *arg)
+{
+	int i = *((int *)arg);
+	(void)karg;
+	switch (i) {
+	case SCROLL_PAGE_UP:
+		return vi_scrollbackward(MAX(1, vi_arg1) * (xrows - 1));
+	case SCROLL_PAGE_DOWN:
+		return vi_scrollforeward(MAX(1, vi_arg1) * (xrows - 1));
+	case SCROLL_UP:
+		return vi_scrollbackward(MAX(1, vi_arg1));
+	case SCROLL_DOWN:
+		return vi_scrollforeward(MAX(1, vi_arg1));
+	}
+	return 1;
 }
 
 static int
@@ -1320,7 +1368,7 @@ match_tree(KeyNode *node, KeyArg *arg)
 			r = ex_command(n->cmd);
 			break;
 		case MAP_FN:
-			r = n->fn(arg);
+			r = n->fn(arg, (void *)&n->arg);
 			break;
 		default:
 			return 1;
@@ -1342,7 +1390,7 @@ doop:
 				snprintf(buf, sizeof buf, "%d:%d%s", r1, r2, n->cmd);
 				return ex_command(buf);
 			case MAP_FN:
-				return n->fn(arg);
+				return n->fn(arg, (void *)&n->arg);
 			default:
 				return 1;
 			}
@@ -1375,7 +1423,7 @@ main(int argc, char *argv[])
 		blaze822_loop(argc-optind, argv+optind, seq_add);
 
 	term_init();
-	printf("num=%d\n", num);
+	fprintf(stderr, "num=%d\n", num);
 	scan(0, num);
 
 	xtop = MAX(0, xrow - xrows / 2);
