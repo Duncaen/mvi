@@ -92,6 +92,7 @@ static int ec_write(struct exarg *);
 static int ec_glob(struct exarg *);
 static int ec_linenum(struct exarg *);
 static int ec_exec(struct exarg *);
+static int ec_grep(struct exarg *);
 static int ec_null(struct exarg *);
 
 static struct excmd excmds[] = {
@@ -101,7 +102,8 @@ static struct excmd excmds[] = {
 	{ "r", "read", ec_read },
 	{ "w", "write", ec_write },
 	{ "w!", "write!", ec_write },
-	{ "v", "vglobal", ec_glob},
+	{ "v", "vglobal", ec_glob },
+	{ "g", "grep", ec_grep },
 	{ "=", "=", ec_linenum },
 	{ "!", "!", ec_exec },
 	{ "", "", ec_null },
@@ -854,6 +856,65 @@ ec_glob(struct exarg *arg)
 }
 
 static int
+ec_grep(struct exarg *arg)
+{
+	fprintf(stderr, "ec_grep: cmd=%s args=%s r1=%d r2=%d\n", arg->cmd, arg->args, arg->r1, arg->r2);
+	char *p, *pe, *pat;
+	char buf[1024];
+	ssize_t l;
+	int i;
+	int r1, r2;
+
+	// default to all mails
+	if (!arg->r1 && !arg->r2) {
+		r1 = 0, r2 = num;
+	} else {
+		r1 = arg->r1, r2 = arg->r2;
+	}
+
+	// dont allow backwards ranges
+	if (r2 - r1 < 0)
+		return 1;
+
+	if (*arg->args == '/') {
+		if ((l = strlen(arg->args)-1) > sizeof buf)
+			return 1;
+		for (p = arg->args+1, i = 0; *p && *p != '/' && arg->args-p < l; p++) {
+			if (*p == '\\' && p[1] == '/')
+				p++;
+			buf[i++] = *p;
+		}
+		if (*p != '/')
+			return 1;
+		buf[i+1] = '\0';
+		pat = buf;
+		fprintf(stderr, "ec_grep: pat=%s\n", pat);
+	} else {
+		pat = arg->args;
+		while (isspace(*pat))
+			pat++;
+	}
+
+	int r;
+	char **argv;
+	char *input;
+	size_t inlen;
+	r = 0;
+
+	argv = (char*[]){"magrep", pat, (void*)0};
+	inlen = seq_get(&input, r1, r2);
+
+
+	term_pos(xrows, 0);
+	term_done();
+	r = cmd_pipe(argv, input, inlen, 0, 0, 0, 0);
+	printed++;
+	term_init();
+
+	return r;
+}
+
+static int
 ec_null(struct exarg *arg)
 {
 	return 0;
@@ -981,7 +1042,7 @@ ex_command(char *s)
 
 		fprintf(stderr, "ex_command: %s r1=%d r2=%d\n", p, arg.r1, arg.r2);
 		p1 = p;
-		while (isspace(*p1) || isalpha(*p1))
+		while (isalpha(*p1))
 			p1++;
 		if (*p1 == '!')
 			p1++;
