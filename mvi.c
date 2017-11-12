@@ -116,8 +116,11 @@ enum mapype {
 };
 
 enum {
-	SEARCH_UP = 1,
-	SEARCH_DOWN,
+	SEARCH_UP = 1<<0,
+	SEARCH_DOWN = 1<<1,
+	SEARCH_PROMPT = 1<<2,
+};
+enum {
 	SCROLL_UP,
 	SCROLL_DOWN,
 	SCROLL_PAGE_UP,
@@ -192,8 +195,8 @@ static KeyNode keytree[] = {
 	MAP_CMD('j', KEY_MOTION, "+"),
 	MAP_CMD('k', KEY_MOTION, "-"),
 	MAP_FUN(':', 0, ui_excmd, {0}),
-	MAP_FUN('/', KEY_MOTION, ui_search, {.i=SEARCH_DOWN}),
-	MAP_FUN('?', KEY_MOTION, ui_search, {.i=SEARCH_UP}),
+	MAP_FUN('/', KEY_MOTION, ui_search, {.i=SEARCH_PROMPT|SEARCH_DOWN}),
+	MAP_FUN('?', KEY_MOTION, ui_search, {.i=SEARCH_PROMPT|SEARCH_UP}),
 	MAP_FUN('n', KEY_MOTION, ui_search, {.i=SEARCH_DOWN}),
 	MAP_FUN('N', KEY_MOTION, ui_search, {.i=SEARCH_UP}),
 	MAP_FUN(TK_CTL('z'), 0, ui_suspend, {0}),
@@ -1018,13 +1021,13 @@ static char *search_kwd;
 static int search_dir;
 
 static int
-vi_search(int cmd, int cnt)
+vi_search(int c, int prompt, int dir, int cnt)
 {
-	int i, j, dir;
+	int i, j;
 	int res = nrow;
 
-	if (cmd == '/' || cmd == '?') {
-		char sign[2] = { cmd, 0 };
+	if (prompt) {
+		char sign[2] = { c, 0 };
 		char *kw = vi_prompt(sign, 0);
 		if (!kw)
 			return 1;
@@ -1039,13 +1042,14 @@ vi_search(int cmd, int cnt)
 		free(search_kwd);
 		search_kwd = strdup(kw);
 		free(kw);
-		search_dir = cmd == '/' ? +1 : -1;
+		search_dir = dir;
 		res = 0;
 	} else if (!search_kwd) {
 		return 1;
 	}
 
-	dir = cmd == 'N' ? -search_dir : search_dir;
+	if (!prompt)
+		dir = dir == -1 ? -search_dir : search_dir;
 	for (i = 0; i < cnt; i++) {
 		for (j = res ? res : nrow; j >= 0 && j < num; j += dir)
 			if (regexec(&pattern, mails[j].scan, 0, 0, 0) == 0)
@@ -1299,7 +1303,11 @@ static int
 ui_search(KeyArg *karg, void *arg)
 {
 	int cnt = (vi_arg1 ? vi_arg1 : 1) * (vi_arg2 ? vi_arg2 : 1);
-	if (vi_search(*karg->key, cnt))
+	int f = *((int *)arg);
+	int prompt = (f&SEARCH_PROMPT);
+	int dir = (f&SEARCH_DOWN) ? +1 : -1;
+	fprintf(stderr, "ui_search: prompt=%d dir=%d\n", prompt,dir);
+	if (vi_search(*karg->key, prompt, dir, cnt))
 		return 1; 
 	return 0;
 }
