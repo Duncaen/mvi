@@ -39,42 +39,149 @@ struct sbuf {
 struct mail {
 	char *file;
 	char *scan;
-	long idx;
 	long depth;
 };
 
-static char *mscan_argv[] = {
-	"mscan", "-f", "%u%r %10d %17f %t %2i%s",
-	(char *)0,
+struct exarg {
+	int r1;
+	int r2;
+	char *cmd;
+	char *args;
 };
 
-static char *print_argv[] = {
-	"mshow",
-	(char *)0,
+struct excmd {
+	char *abbr;
+	char *name;
+	int (*ec)(struct exarg *);
 };
 
-struct mail *mails;
 ssize_t mailalloc = 1024;
+static int num = 0;
+struct mail *mails;
 
 static struct termios termios;
-
 static struct sbuf *term_sbuf;
 static int cols;
 static int rows;
+static int mod;
 
 static int xrow;
 static int xtop;
 
 static int nlen;
 
-static char vi_msg[512];
-
-static int vi_arg1, vi_arg2;
-
-int idx;
-
 static int quit = 0;
 static int printed = 0;
+
+static char vi_msg[512];
+static int vi_arg1, vi_arg2;
+
+static char *mscan_argv[] = {
+	"mscan", "-f", "%u%r %10d %17f %t %2i%s",
+	(char *)0,
+};
+
+static int ec_quit(struct exarg *);
+static int ec_print(struct exarg *);
+static int ec_read(struct exarg *);
+static int ec_write(struct exarg *);
+static int ec_glob(struct exarg *);
+static int ec_linenum(struct exarg *);
+static int ec_exec(struct exarg *);
+static int ec_null(struct exarg *);
+
+static struct excmd excmds[] = {
+	{ "q", "quit", ec_quit },
+	{ "q!", "quit!", ec_quit },
+	{ "p", "print", ec_print },
+	{ "r", "read", ec_read },
+	{ "w", "write", ec_write },
+	{ "w!", "write!", ec_write },
+	{ "v", "vglobal", ec_glob},
+	{ "=", "=", ec_linenum },
+	{ "!", "!", ec_exec },
+	{ "", "", ec_null },
+};
+
+enum mapype {
+	MAP_FN = 1,
+	MAP_EX,
+	MAP_CMD,
+	MAP_KEY,
+	MAP_CHILD,
+};
+
+struct keyarg {
+	char key[128];
+	int pos;
+};
+
+struct keynode {
+	int t;
+	char key;
+	union {
+		char *cmd;
+		int i;
+		char *s;
+		int (*fn)(struct keyarg *);
+		struct keynode *childs;
+	};
+};
+
+#define MAP_NULL	{ 0 }
+#define MAP_CMD(x, y)	{ MAP_CMD, x, {.cmd=(y)} }
+#define MAP_FUN(x, y)	{ MAP_FN, x, {.fn=(y)} }
+#define MAP_SUB(x, ...)	{ MAP_CHILD, x, {.childs=(struct keynode[]){__VA_ARGS__}} }
+
+static int ui_excmd(struct keyarg *);
+static int ui_search(struct keyarg *);
+static int ui_null(struct keyarg *);
+
+static int ui_null(struct keyarg *_) { return 1;};
+
+static struct keynode keytree[] = {
+	MAP_SUB(TK_ESC,
+		// ^[[A -- arrow up
+		// ^[[B -- arrow down
+		// ^[[5 -- page up
+		// ^[[6 -- page down
+		MAP_SUB('[',
+			MAP_CMD('A', "prev"),
+			MAP_CMD('B', "next"),
+			MAP_CMD('5', "back"),
+			MAP_CMD('6', "forw"),
+			{0}
+		),
+	),
+	MAP_CMD('j', "next"),
+	MAP_CMD('k', "prev"),
+	MAP_FUN(':', ui_excmd),
+	MAP_FUN('/', ui_search),
+	MAP_FUN('?', ui_search),
+	MAP_FUN('n', ui_search),
+	MAP_FUN('N', ui_search),
+	MAP_FUN(TK_CTL('z'), ui_null),
+	MAP_FUN(TK_CTL('b'), ui_null),
+	MAP_FUN(TK_CTL('f'), ui_null),
+	MAP_FUN(TK_CTL('e'), ui_null),
+	MAP_FUN(TK_CTL('y'), ui_null),
+	MAP_SUB('o', 
+		MAP_CMD('t', "%!mthread"),
+		MAP_CMD('T', "%!sed 's/^[ ]*//'"),
+		{0}
+	),
+	MAP_SUB('s',
+		MAP_CMD('d', "%!msort -d"),
+		MAP_CMD('D', "%!msort -rd"),
+		MAP_CMD('s', "%!msort -s"),
+		MAP_CMD('S', "%!msort -rs"),
+		{0}
+	),
+	{0}
+};
+
+static int m_pipe(int, int, char *);
+static int m_exec(int, int, char *);
 
 static void
 sbuf_extend(struct sbuf *sb, int newsz)
@@ -91,8 +198,16 @@ sbuf_make()
 	return sb;
 }
 
-char
-*sbuf_buf(struct sbuf *sb)
+char *
+sbuf_pos(struct sbuf *sb)
+{
+	if (!sb->mem)
+		sbuf_extend(sb, 1);
+	return sb->mem+sb->len;
+}
+
+char *
+sbuf_buf(struct sbuf *sb)
 {
 	if (!sb->mem)
 		sbuf_extend(sb, 1);
@@ -145,10 +260,12 @@ sbuf_free(struct sbuf *sb)
 	free(sb);
 }
 
-void
-add(char *file)
+static void
+seq_add(char *file)
 {
-	if (idx >= mailalloc) {
+	char *s;
+
+	if (num >= mailalloc) {
 		mailalloc *= 2;
 		if (mailalloc < 0)
 			exit(-1);
@@ -157,16 +274,79 @@ add(char *file)
 			exit(-1);
 		memset(mails+mailalloc/2, 0, sizeof (struct mail) * mailalloc/2);
 	}
+
 	if (!mails)
 		exit(-1);
 
-	char *s = file;
+	s = file;
 	while (*s && *s == ' ')
 		s++;
-	mails[idx].file = strdup(file);
-	mails[idx].idx = idx;
-	mails[idx].depth = s-file;
-	idx++;
+	
+	mails[num].file = strdup(file);
+	mails[num].depth = s-file;
+	num++;
+}
+
+static size_t
+seq_get(char **dst, int r1, int r2)
+{
+	int i;
+	struct sbuf *ibuf = sbuf_make();
+
+	for (i = r1; i <= r2 && i < num; i++) {
+		sbuf_str(ibuf, mails[i].file);
+		sbuf_chr(ibuf, '\n');
+	}
+	return sbuf_done(ibuf, dst);
+}
+
+int
+seq_next_thread(int i)
+{
+	int j;
+	for (j = i; j < num; j++) {
+		/* fprintf(stderr, "]: dr=%ld di=%ld\n", mails[i].depth, mails[i].depth); */
+		if (mails[i].depth < mails[j].depth) {
+			return j > num ? num : j;
+		} else if (mails[i].depth > mails[j].depth) {
+			break;
+		}
+	}
+	return 0;
+}
+
+int
+seq_prev_thread(int i)
+{
+	int j;
+	for (j = i; j >= 0; j--) {
+		if (mails[i].depth > mails[j].depth) {
+			return j > num ? num : j;
+		} else if (mails[i].depth < mails[j].depth) {
+			break;
+		}
+	}
+	return 0;
+}
+
+int
+seq_next_toplevel(int i)
+{
+	int j;
+	for (j = i+2; j < num; j++)
+		if (mails[j].depth == 0)
+			break;
+	return j == num ? num : j;
+}
+
+int
+seq_prev_toplevel(int i)
+{
+	int j;
+	for (j = i-1; j >= 0; j--)
+		if (mails[j].depth == 0)
+			break;
+	return j == 0 ? 0 : j;
 }
 
 static pid_t
@@ -583,329 +763,206 @@ void ex_show(char *msg)
 	snprintf(vi_msg, sizeof(vi_msg), "%s", msg);
 }
 
-#define EXLEN	512
-
-static int ex_lineno(char **num)
-{
-	int n = xrow;
-	switch ((unsigned char) **num) {
-	case '.':
-		*num += 1;
-		break;
-	case '$':
-		n = idx - 1;
-		*num += 1;
-		break;
-	case '\'':
-		/* if (lbuf_jump(xb, (unsigned char) *++(*num), &n, NULL)) */
-		/* 	return -1; */
-		*num += 1;
-		break;
-	case '/':
-	case '?':
-		/* n = ex_search(num); */
-		break;
-	default:
-		if (isdigit((unsigned char) **num)) {
-			n = atoi(*num) - 1;
-			while (isdigit((unsigned char) **num))
-				*num += 1;
-		}
-	}
-	while (**num == '-' || **num == '+') {
-		n += atoi((*num)++);
-		while (isdigit((unsigned char) **num))
-			(*num)++;
-	}
-	return n;
-}
-
 static int
-ex_region(char *loc, int *beg, int *end)
+ec_quit(struct exarg *arg)
 {
-	int naddr = 0;
-	if (!strcmp("%", loc)) {
-		*beg = 0;
-		*end = MAX(0, idx);
-		return 0;
-	}
-	if (!*loc) {
-		*beg = xrow;
-		*end = xrow == idx ? xrow : xrow + 1;
-		return 0;
-	}
-	while (*loc) {
-		int end0 = *end;
-		*end = ex_lineno(&loc) + 1;
-		*beg = naddr++ ? end0 - 1 : *end - 1;
-		if (!naddr++)
-			*beg = *end - 1;
-		while (*loc && *loc != ';' && *loc != ',')
-			loc++;
-		if (!*loc)
-			break;
-		if (*loc == ';')
-			xrow = *end - 1;
-		loc++;
-	}
-	if (*beg < 0 || *beg >= idx)
-		return 1;
-	if (*end < *beg || *end > idx)
-		return 1;
-	return 0;
-}
-
-static char *
-ex_loc(char *s, char *loc)
-{
-	while (*s == ':' || isspace((unsigned char) *s))
-		s++;
-	while (*s && !isalpha((unsigned char) *s) && *s != '=' && *s != '!') {
-		if (*s == '\'')
-			*loc++ = *s++;
-		if (*s == '/' || *s == '?') {
-			int d = *s;
-			*loc++ = *s++;
-			while (*s && *s != d) {
-				if (*s =='\\' && s[1])
-					*loc++ = *s++;
-				*loc++ = *s++;
-			}
-		}
-		if (*s)
-			*loc++ = *s++;
-	}
-	*loc = '\0';
-	return s;
-}
-
-static char * ex_cmd(char *, char *);
-
-/* read ex command argument */
-static char *
-ex_arg(char *s, char *arg)
-{
-	s = ex_cmd(s, arg);
-	while (isspace((unsigned char) *s))
-		s++;
-	while (*s && !isspace((unsigned char) *s)) {
-		if (*s == '\\' && s[1])
-			s++;
-		*arg++ = *s++;
-	}
-	*arg = '\0';
-	return s;
-}
-
-static char *
-ex_argeol(char *ec)
-{
-	char arg[EXLEN];
-	char *s = ex_cmd(ec, arg);
-	while (isspace((unsigned char) *s))
-		s++;
-	return s;
-}
-
-static int
-ec_quit(char *ec)
-{
-	(void) ec;
-	/* char cmd[EXLEN]; */
-	/* ex_cmd(ec, cmd); */
-	/* if (!strchr(cmd, '!')) */
-	/* 	if (ex_modifiedbuffer("buffer modified\n")) */
-	/* 		return 1; */
 	quit = 1;
 	return 0;
 }
 
-static int ex_expand(char *d, char *s)
-{
-	while (*s) {
-		int c = (unsigned char) *s++;
-		if (c == '%') {
-			/* if (!bufs[0].path || !bufs[0].path[0]) { */
-			/* 	ex_show("\"%\" is unset\n"); */
-			/* 	return 1; */
-			/* } */
-			/* strcpy(d, bufs[0].path); */
-			/* d = strchr(d, '\0'); */
-			continue;
-		}
-		if (c == '#') {
-			/* if (!bufs[1].path || !bufs[1].path[0]) { */
-			/* 	ex_show("\"#\" is unset\n"); */
-			/* 	return 1; */
-			/* } */
-			/* strcpy(d, bufs[1].path); */
-			/* d = strchr(d, '\0'); */
-			continue;
-		}
-		if (c == '\\' && (*s == '%' || *s == '#'))
-			c = *s++;
-		*d++ = c;
-	}
-	*d = '\0';
-	return 0;
-}
-
 static int
-ec_linenum(char *cmd)
+ec_linenum(struct exarg *arg)
 {
-	(void) cmd;
 	snprintf(vi_msg, sizeof(vi_msg), "%d", xrow+1);
 	return 0;
 }
 
 static int
-ec_exec(char *cmd)
+ec_exec(struct exarg *arg)
 {
 	int r;
 
-	/* fprintf(stderr, "ec_)exec cmd=%s\n", cmd); */
+	fprintf(stderr, "ec_exec: cmd=%s args=%s r1=%d r2=%d\n", arg->cmd, arg->args, arg->r1, arg->r2);
 
-	cmd++;
+	/* term_pos(xrows, 0); */
+	/* term_str("\n"); */
+	r = m_pipe(arg->r1, arg->r2, arg->args);
 
-	term_pos(xrows, 0);
-	term_str("\n");
-	
-	r = cmd_pipesh(cmd, 0, 0, 0, 0, 0, 0);
-	printed++;
+	/* printed++; */
 	return r;
 }
 
+static int
+ec_write(struct exarg *arg)
+{
+	fprintf(stderr, "ec_write: cmd=%s args=%s r1=%d r2=%d\n", arg->cmd, arg->args, arg->r1, arg->r2);
+	return 0;
+}
 
 static int
-ec_read(char *ec)
+ec_read(struct exarg *arg)
 {
-	char arg[EXLEN], loc[EXLEN];
-	char msg[128];
-	int beg, end;
-	char *path;
-	char *obuf;
-	size_t olen;
-	int n = idx;
-	ex_arg(ec, arg);
-	ex_loc(ec, loc);
-	/* path = arg[0] ? arg : ex_path(); */
-	if (ex_region(loc, &beg, &end))
+	return 0;
+}
+
+static int
+ec_glob(struct exarg *arg)
+{
+	return 0;
+}
+
+static int
+ec_null(struct exarg *arg)
+{
+	return 0;
+}
+
+static int
+ec_print(struct exarg *arg)
+{
+	int r1, r2;
+
+	// default to current mail
+	r1 = arg->r1 ? arg->r1 : xrow+1;
+	r2 = arg->r2 ? arg->r2 : r1;
+	// dont allow backwards ranges
+	if (r2 - r1 < 0)
 		return 1;
-	if (arg[0] == '!') {
-		int pos = MIN(xrow + 1, idx);
-		if (ex_expand(arg, ex_argeol(ec)))
-			return 1;
-		cmd_pipesh(arg + 1, 0, 0, &obuf, &olen, 0, 0);
-		/* if (obuf) */
-		/* 	lbuf_edit(xb, obuf, pos, pos); */
-		free(obuf);
-	} else {
-		int fd = open(path, O_RDONLY);
-		int pos = idx ? end : 0;
-		if (fd < 0) {
-			ex_show("read failed\n");
-			return 1;
+
+	printed++;
+	term_pos(xrows, 0);
+	term_str("\n");
+	for (int i = r1-1; i < r2; i++) {
+		term_str(mails[i].file);
+		term_str("\n");
+	}
+
+	return 0;
+}
+
+static size_t
+ex_num(char *s, int *r)
+{
+	char c;
+	int n;
+	size_t l;
+	l = 1;
+	n = 0;
+	c = *s++;
+	fprintf(stderr, "ex_num: c=%c\n", c);
+	if (isdigit(c)) {
+		while (isdigit(c)) {
+			n = n * 10 + c - '0';
+			c = *s++;
+			l++;
 		}
-		/* if (lbuf_rd(xb, fd, pos, pos)) { */
-		/* 	ex_show("read failed\n"); */
-		/* 	close(fd); */
-		/* 	return 1; */
-		/* } */
-		close(fd);
 	}
-	xrow = end + idx - n - 1;
-	snprintf(msg, sizeof(msg), "\"%s\"  %d lines  [r]\n",
-			path, idx - n);
-	ex_show(msg);
-	return 0;
+	l--;
+	*r = n;
+	fprintf(stderr, "ex_num: l=%d n=%d\n", l, n);
+	return l;
 }
 
-static int
-ec_glob(char *cmd)
+static ssize_t
+ex_mmsg(char *s, int *r) 
 {
-	return 0;
-}
-
-static int
-ec_null(char *cmd)
-{
-	return 0;
-}
-
-static struct excmd {
-	char *abbr;
-	char *name;
-	int (*ec)(char *s);
-} excmds[] = {
-	{ "q", "quit", ec_quit },
-	{ "q!", "quit!", ec_quit },
-	{ "r", "read", ec_read },
-	{ "v", "vglobal", ec_glob},
-	{ "=", "=", ec_linenum },
-	{ "!", "!", ec_exec },
-	{ "", "", ec_null },
-};
-
-static char *
-ex_cmd(char *s, char *cmd)
-{
-	char *cmd0 = cmd;
-	s = ex_loc(s, cmd);
-	while (isspace((unsigned char) *s))
-		s++;
-	while (isalpha((unsigned char) *s))
-		if ((*cmd++ = *s++) == 'k' && cmd == cmd0 + 1)
+	int n = 0, m = 0;
+	char *p;
+	p = s;
+	while (*p)
+		switch (*p) {
+		case '.':
+			p++;
+			n = xrow+1;
 			break;
-	if (*s == '!' || *s == '=')
-		*cmd++ = *s++;
-	*cmd = '\0';
-	return s;
+		case '+':
+			p++;
+			p += ex_num(p, &m);
+			if (!m) m = 1;
+			n = n ? n+m : xrow+1+m;
+			break;
+		case '-':
+			p++;
+			p += ex_num(p, &m);
+			if (!m) m = 1;
+			n = n ? n-m : xrow+1-m;
+			break;
+		default:
+			p += ex_num(p, &m);
+			if (!m) goto ret;
+			n += m;
+		}
+ret:
+	*r = n;
+	return p-s;
 }
 
-
-static void
-ex_line(int (*ec)(char *s), char *dst, char **src)
+static ssize_t
+ex_range(char *s, int *r1, int *r2)
 {
-	if (!ec || ec != ec_glob) {
-		while (**src && **src != '|' && **src != '\n')
-			*dst++ = *(*src)++;
-		*dst = '\0';
-		if (**src)
-			(*src)++;
-	} else {
-		strcpy(dst, *src);
-		*src = strchr(*src, '\0');
+	char *p = s;
+	if (*s == '%') {
+		*r1 = 1;
+		*r2 = num-1;
+		return 1;
 	}
+	fprintf(stderr, "ex_range1: p=%s\n", p);
+	p += ex_mmsg(p, r1);
+	fprintf(stderr, "ex_range2: p=%s\n", p);
+	if (*p == ':') {
+		p++;
+		p += ex_mmsg(p, r2);
+	}
+	fprintf(stderr, "ex_range3: p=%s\n", p);
+	return p-s;
 }
 
 static int
-ex_exec(char *ln)
+ex_command(char *s)
 {
-	char ec[EXLEN];
-	char cmd[EXLEN];
+	char buf[128];
+	struct exarg arg;
 	size_t i;
-	int ret = 0;
+	int ret, r1, r2;
+	char *p, *p1;
 
-	while (*ln) {
-		ex_cmd(ln, cmd);
+	fprintf(stderr, "ex_command: %s\n", s);
+
+	ret = 1;
+	p = s;
+
+	while (1) {
+		r1 = r2 = 0;
+		p += ex_range(p, &r1, &r2);
+		arg.r1 = r1 ? MIN(MAX(r1, 1), num) : 0;
+		arg.r2 = r2 ? MIN(MAX(r2, 1), num) : 0;
+
+		fprintf(stderr, "ex_command: %s\n", p);
+		p1 = p;
+		while (isspace(*p1) || isalpha(*p1))
+			p1++;
+		if (*p1 == '!')
+			p1++;
+		if (p1-p > sizeof buf)
+			return 1;
+		strncpy(buf, p, p1-p);
+		arg.cmd = buf;
+		arg.args = p1;
+		fprintf(stderr, "ex_command: %s\n", buf);
+
 		for (i = 0; i < LEN(excmds); i++) {
-			if (!strcmp(excmds[i].abbr, cmd) ||
-			    !strcmp(excmds[i].name, cmd)) {
-				ex_line(excmds[i].ec, ec, &ln);
-				ret = excmds[i].ec(ec); // XXX: pass cmd
+			if (!strcmp(excmds[i].abbr, buf) ||
+				!strcmp(excmds[i].name, buf)) {
+				if ((ret = excmds[i].ec(&arg)))
+					goto ret;
 				break;
 			}
 		}
+		break;
 	}
 
+ret:
 	return ret;
-}
-
-void
-ex_command(char *ln)
-{
-	ex_exec(ln);
-	// reg_put(':', ln, 0);
 }
 
 // XXX: leaking on exit, dont care at the moment
@@ -914,7 +971,7 @@ static char *search_kwd;
 static int search_dir;
 
 static int
-vi_search(int cmd, int cnt, int *row, int *off)
+vi_search(int cmd, int cnt, int *row)
 {
 	int i, j, dir;
 	int res = *row;
@@ -943,7 +1000,7 @@ vi_search(int cmd, int cnt, int *row, int *off)
 
 	dir = cmd == 'N' ? -search_dir : search_dir;
 	for (i = 0; i < cnt; i++) {
-		for (j = res ? res : *row; j >= 0 && j < idx; j += dir)
+		for (j = res ? res : *row; j >= 0 && j < num; j += dir)
 			if (regexec(&pattern, mails[j].scan, 0, 0, 0) == 0)
 				if (j != res) {
 					res = j;
@@ -970,7 +1027,7 @@ scan(int r1, int r2)
 	char *input, *output, *error;
 	size_t inlen, outlen, errlen;
 
-	for (i = r1; i <= r2 && i < idx; i++) {
+	for (i = r1; i <= r2 && i < num; i++) {
 		sbuf_str(ibuf, mails[i].file);
 		sbuf_chr(ibuf, '\n');
 	}
@@ -999,18 +1056,18 @@ vi_motionln(int *row, int cmd)
 	case '+':
 	case '\n':
 	case 'j':
-		*row = MIN(*row + cnt, idx - 1);
+		*row = MIN(*row + cnt, num - 1);
 		break;
 	case '-':
 	case 'k':
 		*row = MAX(*row - cnt, 0);
 		break;
 	case 'G':
-		*row = (vi_arg1 || vi_arg2) ? cnt - 1 : idx - 1;
+		*row = (vi_arg1 || vi_arg2) ? cnt - 1 : num - 1;
 		break;
 	default:
 		if (c == cmd) {
-			 *row = MIN(*row + cnt - 1, idx - 1);
+			 *row = MIN(*row + cnt - 1, num - 1);
 			 break;
 		}
 		vi_back(c);
@@ -1032,12 +1089,13 @@ vi_motion(int *row, int *off)
 	mv = vi_read();
 	switch (mv) {
 	case '[':
+		fprintf(stderr, "hmm\n");
 		if (vi_read() != '[')
 			return -1;
 		for (i = 0; i < cnt; i++) {
 			for (j = *row; j >= 0; j--)
 				if (mails[*row].depth > mails[j].depth) {
-					*row = j > idx ? idx : j;
+					*row = j > num ? num : j;
 					break;
 				} else if (mails[*row].depth < mails[j].depth) {
 					break;
@@ -1045,13 +1103,14 @@ vi_motion(int *row, int *off)
 		}
 		break;
 	case ']':
+		fprintf(stderr, "hmm1\n");
 		if (vi_read() != ']')
 			return -1;
 		for (i = 0; i < cnt; i++) {
-			for (j = *row; j < idx; j++) {
+			for (j = *row; j < num; j++) {
 				/* fprintf(stderr, "]: dr=%ld di=%ld\n", mails[*row].depth, mails[i].depth); */
 				if (mails[*row].depth < mails[j].depth) {
-					*row = j > idx ? idx : j;
+					*row = j > num ? num : j;
 					break;
 				} else if (mails[*row].depth > mails[j].depth) {
 					break;
@@ -1066,16 +1125,16 @@ vi_motion(int *row, int *off)
 		*row = i == 0 ? 0 : i;
 		break;
 	case '}':
-		for (i = *row+2; i < idx; i++)
+		for (i = *row+2; i < num; i++)
 			if (*mails[i].file != ' ' && --cnt == 0)
 				break;
-		*row = i == idx ? idx : i;
+		*row = i == num ? num : i;
 		break;
 	case '/':
 	case '?':
 	case 'n':
 	case 'N':
-		if (vi_search(mv, cnt, row, off))
+		if (vi_search(mv, cnt, row))
 			return -1;
 		break;
 	default:
@@ -1100,48 +1159,48 @@ vi_prefix()
 	return n;
 }
 
-void
+static int
 m_exec(int r1, int r2, char *cmd)
 {
-	int i;
+	int i, r;
 	struct sbuf *ibuf = sbuf_make();
 	char *input;
 	size_t inlen;
 
+	r = 0;
+
 	term_pos(xrows, 0);
 	term_done();
 
-	for (i = r1; i <= r2 && i < idx; i++) {
+	for (i = r1; i <= r2 && i < num; i++) {
 		sbuf_str(ibuf, mails[i].file);
 		sbuf_chr(ibuf, '\n');
 	}
 	inlen = sbuf_done(ibuf, &input);
 
-	cmd_pipesh(cmd, input, inlen, 0, 0, 0, 0);
+	r = cmd_pipesh(cmd, input, inlen, 0, 0, 0, 0);
 
 	printed++;
 	term_init();
+	return r;
 }
 
-void
+static int
 m_pipe(int r1, int r2, char *cmd)
 {
-	int i;
-	struct sbuf *ibuf = sbuf_make();
+	int i, r;
 	char *input, *output, *error;
 	size_t inlen, outlen, errlen;
 
+	r = 0;
+
 	fprintf(stderr, "mpipe r1=%d r2=%d\n", r1, r2);
 
-	for (i = r1; i <= r2 && i <= idx; i++) {
-		sbuf_str(ibuf, mails[i].file);
-		sbuf_chr(ibuf, '\n');
-	}
-	inlen = sbuf_done(ibuf, &input);
+	inlen = seq_get(&input, r1, r2);
 
 	fprintf(stderr, "mpipe >\n %s\n", input);
 
-	cmd_pipesh(cmd, input, inlen, &output, &outlen, 0, 0);
+	cmd_pipesh(cmd, input, inlen, &output, &outlen, &error, &errlen);
 
 	fprintf(stderr, "mpipe <\n %s\n", output);
 
@@ -1156,22 +1215,11 @@ m_pipe(int r1, int r2, char *cmd)
 		p = d+1;
 	}
 	scan(r1, r2);
+	return r;
 }
 
-struct motion {
-	char key;
-	void (*mc)(int, int, char *);
-	char *cmd;
-} motions[] = {
-	{ 'p', m_exec, "mshow" },
-	{ 'd', m_pipe, "./mflag -vS" },
-	{ 'u', m_pipe, "./mflag -vs" },
-	{ 't', m_pipe, "./mflag -vt" },
-	{ 'T', m_pipe, "./mflag -vT" },
-};
-
 static int
-vc_motion(int cmd)
+vc_motion(int c)
 {
 	int mv;
 	int r1 = xrow, r2 = xrow;
@@ -1180,21 +1228,14 @@ vc_motion(int cmd)
 	if (vi_arg2 < 0)
 		return 1;
 
-	if ((mv = vi_motionln(&r2, cmd))) {
+	if ((mv = vi_motionln(&r2, c))) {
 		//o2 = -1;
 	} else if (!(mv = vi_motion(&r2, 0))) {
-		vi_read();
+		/* vi_read(); */
 		return 1;
 	}
 	if (mv < 0)
 		return 1;
-
-	size_t i;
-	for (i = 0; i < LEN(motions); i++)
-		if (motions[i].key == cmd) {
-			motions[i].mc(r1, r2, motions[i].cmd);
-			return 0;
-		}
 
 	return 1;
 }
@@ -1203,7 +1244,7 @@ void
 draw_row(int row)
 {
 	char *s = 0;
-	if (row < idx)
+	if (row < num)
 		s = mails[row].scan;
 
 	/* fprintf(stderr, "draw_row row=%d xrow=%d\n", row, xrow); */
@@ -1217,7 +1258,18 @@ draw_row(int row)
 	if (row == xrow) {
 		term_str("\33[0;32m");
 	}
-	term_str(s ? s : (row ? "~" : ""));
+	if (s) {
+		int i = strlen(s)+nlen;
+		if (i > cols) {
+			char *st = strndup(s, i-nlen);
+			term_str(st);
+			free(st);
+		} else {
+			term_str(s);
+		}
+	} else {
+		term_str("~");
+	}
 	if (row == xrow) {
 		term_str("\33[0m");
 	}
@@ -1289,9 +1341,9 @@ draw_again(int lineonly)
 static int
 vi_scrollforeward(int cnt)
 {
-	if (xtop >= idx - 1)
+	if (xtop >= num - 1)
 		return 1;
-	xtop = MIN(idx - 1, xtop + cnt);
+	xtop = MIN(num - 1, xtop + cnt);
 	xrow = MAX(xrow, xtop);
 	return 0;
 }
@@ -1304,6 +1356,58 @@ vi_scrollbackward(int cnt)
 	xtop = MAX(0, xtop - cnt);
 	xrow = MIN(xrow, xtop + xrows - 1);
 	return 0;
+}
+
+static int
+ui_excmd(struct keyarg *arg)
+{
+	char *cmd;
+	int r;
+	r = 1;
+	mod = 1;
+	cmd = vi_prompt(":", 0);
+	if (cmd)
+		r = ex_command(cmd);
+	free(cmd);
+	return r;
+}
+
+static int
+ui_search(struct keyarg *arg)
+{
+	int cnt = (vi_arg1 ? vi_arg1 : 1) * (vi_arg2 ? vi_arg2 : 1);
+	if (vi_search(*arg->key, cnt, xrow-1))
+		return 1; 
+	return 0;
+}
+
+static int
+match_tree(struct keynode *node, struct keyarg *arg)
+{
+	size_t i;
+	int c = vi_read();
+	arg->key[arg->pos++] = c;
+	if (TK_INT(c)) {
+		return match_tree(keytree[0].childs, arg);
+	}
+	fprintf(stderr, "match_tree: c=%d\n",c);
+	for (i = 0; ; i++) {
+		if (node[i].key == 0) break;
+		if (node[i].key != c) continue;
+		if (node[i].t == MAP_CHILD) {
+			return match_tree(node[i].childs, arg);
+		} else {
+			fprintf(stderr, "matched: %s\n", node[i].cmd);
+			switch (node[i].t) {
+			case MAP_CMD:
+				return ex_command(node[i].cmd);
+			case MAP_FN:
+				return node[i].fn(arg);
+			}
+		}
+	}
+	/* vi_back(c); */
+	return 1;
 }
 
 int main(int argc, char *argv[])
@@ -1323,24 +1427,26 @@ int main(int argc, char *argv[])
 		exit(-1);
 
 	if (argc == optind && isatty(0))
-		blaze822_loop1(":", add);
+		blaze822_loop1(":", seq_add);
 	else
-		blaze822_loop(argc-optind, argv+optind, add);
+		blaze822_loop(argc-optind, argv+optind, seq_add);
 
 	term_init();
-	scan(0, idx);
-
+	printf("num=%d\n", num);
+	scan(0, num);
 
 	xtop = MAX(0, xrow - xrows / 2);
 	nlen = 1;
-	for (int l = idx+1; l > 9; l /= 10)
+	for (int l = num+1; l > 9; l /= 10)
 		nlen++;
 	draw_again(0);
 	term_pos(xrow - xtop, 0);
 
 	char *cmd;
+	struct keyarg karg;
 	while (!quit) {
-		int mod = 0;
+		mod = 0;
+		karg.pos = 0;
 		int mv;
 		int otop = xtop;
 		int nrow = xrow;
@@ -1354,6 +1460,7 @@ int main(int argc, char *argv[])
 		} else if (mv == 0) {
 			char c = vi_read();
 			switch (c) {
+#if 0
 			case TK_CTL('b'):
 				if (vi_scrollbackward(MAX(1, vi_arg1) * (xrows - 1)))
 					break;
@@ -1390,36 +1497,30 @@ int main(int argc, char *argv[])
 				vc_motion('p');
 				mod = 1;
 				break;
+#endif
 			default:
-				if (TK_INT(c)) {
-					// ^[[A -- arrow up
-					// ^[[B -- arrow down
-					// ^[[5 -- page up
-					// ^[[6 -- page down
-					if ((c = vi_read()) == '[')
-						switch ((c = vi_read())) {
-						case 'A': vi_back('k'); continue;
-						case 'B': vi_back('j'); continue;
-						case '5': vi_back(TK_CTL('b')); continue;
-						case '6': vi_back(TK_CTL('f')); continue;
-						default: vi_back(c);
-						}
-					vi_back(c);
+				vi_back(c);
+				if (!match_tree(keytree, &karg))
+					break;
+				if (!vc_motion(c)) {
+					mod = 1;
 					break;
 				}
-				if (!vc_motion(c))
-					mod = 1;
+
 			}
 		}
-		if (xrow < 0 || xrow >= idx)
-			xrow = idx ? idx - 1 : 0;
+
+		if (xrow < 0 || xrow >= num)
+			xrow = num ? num - 1 : 0;
 		if (xtop > xrow)
 			xtop = xtop - xrows / 2 > xrow ?
 			    MAX(0, xrow - xrows / 2) : xrow;
 		if (xtop + xrows <= xrow)
 			xtop = xtop + xrows + xrows / 2 <= xrow ?
 			    xrow - xrows / 2 : xrow - xrows + 1;
+
 		vi_wait();
+
 		if (mod)
 			draw_again(mod == 2);
 		if (xtop != otop) {
