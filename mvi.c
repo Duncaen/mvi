@@ -42,6 +42,11 @@ struct mail {
 	long depth;
 };
 
+struct seq {
+	struct mail *mails;
+	int num;
+};
+
 struct exarg {
 	int r1;
 	int r2;
@@ -56,8 +61,11 @@ struct excmd {
 };
 
 ssize_t mailalloc = 1024;
-static int num = 0;
-struct mail *mails;
+
+static struct seq main_seq;
+static struct seq grep_seq;
+static struct seq search_seq;
+static struct seq *temp_seq;
 
 static struct termios termios;
 static struct sbuf *term_sbuf;
@@ -313,45 +321,71 @@ sbuf_free(struct sbuf *sb)
 }
 
 static void
-seq_add(char *file)
+addcb(char *file)
 {
 	char *s;
 
-	if (num >= mailalloc) {
+	if (temp_seq->num >= mailalloc) {
 		mailalloc *= 2;
 		if (mailalloc < 0)
 			exit(-1);
-		mails = realloc(mails, sizeof (struct mail) * mailalloc);
-		if (!mails)
+		temp_seq->mails = realloc(temp_seq->mails, sizeof (struct mail) * mailalloc);
+		if (!temp_seq->mails)
 			exit(-1);
-		memset(mails+mailalloc/2, 0, sizeof (struct mail) * mailalloc/2);
+		memset(temp_seq->mails+mailalloc/2, 0, sizeof (struct mail) * mailalloc/2);
 	}
 
-	if (!mails)
+	if (!temp_seq->mails)
 		exit(-1);
 
 	s = file;
 	while (*s && *s == ' ')
 		s++;
 	
-	mails[num].file = strdup(file);
-	mails[num].depth = s-file;
-	num++;
+	temp_seq->mails[temp_seq->num].file = strdup(file);
+	temp_seq->mails[temp_seq->num].depth = s-file;
+	temp_seq->num++;
 }
 
+static void
+seq_free(struct seq *sq)
+{
+	int i;
+	for (i = 0; i < sq->num; i++) {
+		free(sq->mails[i].file);
+	}
+}
+
+static void
+seq_read(struct seq *sq, int argc, char *argv[])
+{
+	temp_seq = sq;
+
+	if (!sq->mails)
+		if (!(sq->mails = calloc(sizeof (struct mail), mailalloc)))
+			exit(-1);
+
+	if (argc == 0)
+		blaze822_loop1(":", addcb);
+	else
+		blaze822_loop(argc, argv, addcb);
+}
+
+
 static size_t
-seq_get(char **dst, int r1, int r2)
+seq_get(struct seq *sq, char **dst, int r1, int r2)
 {
 	int i;
 	struct sbuf *ibuf = sbuf_make();
 
-	for (i = r1; i <= r2 && i < num; i++) {
-		sbuf_str(ibuf, mails[i].file);
+	for (i = r1; i <= r2 && i < sq->num; i++) {
+		sbuf_str(ibuf, sq->mails[i].file);
 		sbuf_chr(ibuf, '\n');
 	}
 	return sbuf_done(ibuf, dst);
 }
 
+#if 0
 int
 seq_next_thread(int i)
 {
@@ -400,6 +434,7 @@ seq_prev_toplevel(int i)
 			break;
 	return j == 0 ? 0 : j;
 }
+#endif
 
 static pid_t
 cmd_exec(char *argv[], int *ifd, int *ofd, int *efd)
@@ -455,29 +490,6 @@ fail:
 	if (efd) *efd = pipe2[0];
 	return pid;
 }
-
-/*
-void
-seq_to_nl()
-{
-	if (inlen == 0) {
-		char *s = mails[oidx++].file;
-		inlen = strlen(s);
-		if (inlen + 512 > inalloc) {
-			inalloc *= 2;
-			if (inalloc < 0)
-				exit(-1);
-			input = realloc(input, inalloc);
-			if (!input)
-				exit(-1);
-		}
-		memcpy(input, s, inlen);
-		input[inlen++] = '\n';
-		input[inlen] = '\0';
-		inpos = input;
-	}
-}
-*/
 
 int
 cmd_pipe(char *argv[],
@@ -757,6 +769,8 @@ vi_prompt(char *msg, int *kbmap)
 	char *p;
 	int pos = strlen(msg);
 
+	(void)(kbmap);
+
 	cmd_max = 1024;
 	cmd = malloc(cmd_max);
 	if (!cmd)
@@ -815,6 +829,7 @@ vi_prompt(char *msg, int *kbmap)
 static int
 ec_quit(struct exarg *arg)
 {
+	(void)(arg);
 	quit = 1;
 	return 0;
 }
@@ -823,6 +838,7 @@ static int
 ec_linenum(struct exarg *arg)
 {
 	snprintf(vi_msg, sizeof(vi_msg), "%d", xrow+1);
+	fprintf(stderr, "ec_linenum: cmd=%s args=%s r1=%d r2=%d\n", arg->cmd, arg->args, arg->r1, arg->r2);
 	return 0;
 }
 
@@ -860,19 +876,48 @@ ec_glob(struct exarg *arg)
 	return 0;
 }
 
+static size_t
+parsepattern(char *buf, size_t n, char *s)
+{
+	char *d, *p;
+
+	if (strlen(s) < n)
+		return 0;
+
+	d = buf;
+
+	// parse /magrep\/pattern/
+	for (p = s+1; *p && *p != '/'; p++) {
+		if (*p == '\\')
+			switch (p[1]) {
+			case '/':
+				p++;
+			}
+		*d = *p;
+	}
+
+	// pattern has to end with a slash
+	if (*p != '/')
+		return 0;
+
+	*d++ = '\0';
+
+	return p-s;
+}
+
 static int
 ec_grep(struct exarg *arg)
 {
-	fprintf(stderr, "ec_grep: cmd=%s args=%s r1=%d r2=%d\n", arg->cmd, arg->args, arg->r1, arg->r2);
-	char *p, *pe, *pat;
 	char buf[1024];
-	ssize_t l;
-	int i;
+	char *pat;
+	size_t l;
 	int r1, r2;
+
+	fprintf(stderr, "ec_grep: cmd=%s args=%s r1=%d r2=%d\n", arg->cmd, arg->args, arg->r1, arg->r2);
 
 	// default to all mails
 	if (!arg->r1 && !arg->r2) {
-		r1 = 0, r2 = num;
+		r1 = 0, r2 = main_seq.num;
 	} else {
 		r1 = arg->r1, r2 = arg->r2;
 	}
@@ -882,19 +927,13 @@ ec_grep(struct exarg *arg)
 		return 1;
 
 	if (*arg->args == '/') {
-		if ((l = strlen(arg->args)-1) > sizeof buf)
+		l = parsepattern(buf, sizeof buf, arg->args);
+		fprintf(stderr, "parsepattern: l=%d\n", l);
+		if (!l)
 			return 1;
-		for (p = arg->args+1, i = 0; *p && *p != '/' && arg->args-p < l; p++) {
-			if (*p == '\\' && p[1] == '/')
-				p++;
-			buf[i++] = *p;
-		}
-		if (*p != '/')
-			return 1;
-		buf[i+1] = '\0';
 		pat = buf;
-		fprintf(stderr, "ec_grep: pat=%s\n", pat);
 	} else {
+		// assume the command is :grep pattern
 		pat = arg->args;
 		while (isspace(*pat))
 			pat++;
@@ -907,7 +946,7 @@ ec_grep(struct exarg *arg)
 	r = 0;
 
 	argv = (char*[]){"magrep", pat, (void*)0};
-	inlen = seq_get(&input, r1, r2);
+	inlen = seq_get(&main_seq, &input, r1, r2);
 
 
 	term_pos(xrows, 0);
@@ -922,6 +961,10 @@ ec_grep(struct exarg *arg)
 static int
 ec_null(struct exarg *arg)
 {
+	// no command, do a motion
+	nrow = MAX(arg->r1, arg->r2);
+	nrow = MAX(MIN(nrow - 1, main_seq.num - 1), 0);
+	mv = 1;
 	return 0;
 }
 
@@ -941,7 +984,7 @@ ec_print(struct exarg *arg)
 	term_pos(xrows, 0);
 	term_str("\n");
 	for (int i = r1-1; i < r2; i++) {
-		term_str(mails[i].file);
+		term_str(main_seq.mails[i].file);
 		term_str("\n");
 	}
 
@@ -1045,7 +1088,7 @@ ex_range(char *s, int *r1, int *r2)
 	char *p = s;
 	if (*s == '%') {
 		*r1 = 1;
-		*r2 = num-1;
+		*r2 = main_seq.num-1;
 		return 1;
 	}
 	fprintf(stderr, "ex_range1: p=%s\n", p);
@@ -1076,26 +1119,21 @@ ex_command(char *s)
 	while (1) {
 		r1 = r2 = 0;
 		p += ex_range(p, &r1, &r2);
-		arg.r1 = r1 ? MIN(MAX(r1, 1), num) : 0;
-		arg.r2 = r2 ? MIN(MAX(r2, 1), num) : 0;
+		arg.r1 = r1 ? MIN(MAX(r1, 1), main_seq.num) : 0;
+		arg.r2 = r2 ? MIN(MAX(r2, 1), main_seq.num) : 0;
 
 		fprintf(stderr, "ex_command: %s r1=%d r2=%d\n", p, arg.r1, arg.r2);
 		p1 = p;
 		while (isalpha(*p1))
 			p1++;
-		if (*p1 == '!')
+		if (*p1 == '!' || *p1 == '=')
 			p1++;
-		if (p1 == p && *p1 == 0) {
-			// no command, do a motion
-			nrow = MAX(arg.r1, arg.r2);
-			nrow = MAX(MIN(nrow - 1, num - 1), 0);
-			fprintf(stderr, "ex_command: motion nrow=%d\n", nrow);
-			mv = 1;
-			return 0;
-		}
 		if ((size_t)(p1-p) > sizeof buf)
 			return 1;
-		strncpy(buf, p, p1-p);
+		if ((size_t)(p1-p) != 0)
+			strncpy(buf, p, p1-p);
+		else
+			buf[0] = '\0';
 		arg.cmd = buf;
 		arg.args = p1;
 		fprintf(stderr, "ex_command: %s\n", buf);
@@ -1151,8 +1189,8 @@ vi_search(int c, int prompt, int dir, int cnt)
 	if (!prompt)
 		dir = dir == -1 ? -search_dir : search_dir;
 	for (i = 0; i < cnt; i++) {
-		for (j = res ? res : nrow; j >= 0 && j < num; j += dir)
-			if (regexec(&pattern, mails[j].scan, 0, 0, 0) == 0)
+		for (j = res ? res : nrow; j >= 0 && j < main_seq.num; j += dir)
+			if (regexec(&pattern, main_seq.mails[j].scan, 0, 0, 0) == 0)
 				if (j != res) {
 					res = j;
 					break;
@@ -1171,21 +1209,21 @@ vi_search(int c, int prompt, int dir, int cnt)
 	return 1;
 }
 
-int
-scan(int r1, int r2)
+static int
+seq_scan(struct seq *seq, int r1, int r2)
 {
 	int i;
 	char *input, *output, *error;
 	size_t inlen, outlen, errlen;
 
-	inlen = seq_get(&input, r1, r2);
+	inlen = seq_get(&main_seq, &input, r1, r2);
 	cmd_pipe(mscan_argv, input, inlen, &output, &outlen, &error, &errlen);
 
 	i = r1;
 	char *p = output, *d;
 	while (p < output+outlen && (d = strchr(p, '\n'))) {
 		*d = '\0';
-		mails[i++].scan = strdup(p);
+		seq->mails[i++].scan = strdup(p);
 		fprintf(stderr, "> %s\n", p);
 		p = d+1;
 	}
@@ -1221,8 +1259,8 @@ m_exec(int r1, int r2, char *cmd)
 	term_pos(xrows, 0);
 	term_done();
 
-	for (i = r1; i <= r2 && i < num; i++) {
-		sbuf_str(ibuf, mails[i].file);
+	for (i = r1; i <= r2 && i < main_seq.num; i++) {
+		sbuf_str(ibuf, main_seq.mails[i].file);
 		sbuf_chr(ibuf, '\n');
 	}
 	inlen = sbuf_done(ibuf, &input);
@@ -1245,7 +1283,7 @@ m_pipe(int r1, int r2, char *cmd)
 
 	fprintf(stderr, "mpipe r1=%d r2=%d\n", r1, r2);
 
-	inlen = seq_get(&input, r1, r2);
+	inlen = seq_get(&main_seq, &input, r1, r2);
 
 	fprintf(stderr, "mpipe >\n %s\n", input);
 
@@ -1257,13 +1295,13 @@ m_pipe(int r1, int r2, char *cmd)
 	char *p = output, *d;
 	while (p < output+outlen && (d = strchr(p, '\n'))) {
 		*d = '\0';
-		fprintf(stderr, "old=%s\n", mails[i].file);
+		fprintf(stderr, "old=%s\n", main_seq.mails[i].file);
 		fprintf(stderr, "new=%s\n", p);
-		mails[i].file = strdup(p);
+		main_seq.mails[i].file = strdup(p);
 		i++;
 		p = d+1;
 	}
-	scan(r1, r2);
+	seq_scan(&main_seq, r1, r2);
 	return r;
 }
 
@@ -1271,16 +1309,16 @@ void
 draw_row(int row)
 {
 	char *s = 0;
-	if (row < num)
-		s = mails[row].scan;
+	if (row < main_seq.num)
+		s = main_seq.mails[row].scan;
 
 	/* fprintf(stderr, "draw_row row=%d xrow=%d\n", row, xrow); */
 	term_pos(row - xtop, 0);
 	term_kill();
 	if (1 && s) {// draw numbers
-		char num[128];
-		snprintf(num, 128, "%*d ", nlen, row+1);
-		term_str(num);
+		char buf[128];
+		snprintf(buf, 128, "%*d ", nlen, row+1);
+		term_str(buf);
 	}
 	if (row == xrow) {
 		term_str("\33[0;32m");
@@ -1368,9 +1406,9 @@ draw_again(int lineonly)
 static int
 vi_scrollforeward(int cnt)
 {
-	if (xtop >= num - 1)
+	if (xtop >= main_seq.num - 1)
 		return 1;
-	xtop = MIN(num - 1, xtop + cnt);
+	xtop = MIN(main_seq.num - 1, xtop + cnt);
 	xrow = MAX(xrow, xtop);
 	return 0;
 }
@@ -1551,22 +1589,17 @@ main(int argc, char *argv[])
 			exit(1);
 		}
 
-	mails = calloc(sizeof (struct mail), mailalloc);
-	if (!mails)
-		exit(-1);
-
 	if (argc == optind && isatty(0))
-		blaze822_loop1(":", seq_add);
+		seq_read(&main_seq, 0, 0);
 	else
-		blaze822_loop(argc-optind, argv+optind, seq_add);
+		seq_read(&main_seq, argc-optind, argv+optind);
 
 	term_init();
-	fprintf(stderr, "num=%d\n", num);
-	scan(0, num);
+	seq_scan(&main_seq, 0, main_seq.num);
 
 	xtop = MAX(0, xrow - xrows / 2);
 	nlen = 1;
-	for (int l = num+1; l > 9; l /= 10)
+	for (int l = main_seq.num+1; l > 9; l /= 10)
 		nlen++;
 	draw_again(0);
 	term_pos(xrow - xtop, 0);
@@ -1584,13 +1617,12 @@ main(int argc, char *argv[])
 		vi_arg1 = vi_prefix();
 
 		if (!match_tree(keytree, &karg)) {
-			fprintf(stderr, "match_tree: done mv=%d nrow=%d\n", mv, nrow);
 			if (mv) xrow = nrow;
 			mod = 1;
 		}
 
-		if (xrow < 0 || xrow >= num)
-			xrow = num ? num - 1 : 0;
+		if (xrow < 0 || xrow >= main_seq.num)
+			xrow = main_seq.num ? main_seq.num - 1 : 0;
 		if (xtop > xrow)
 			xtop = xtop - xrows / 2 > xrow ?
 			    MAX(0, xrow - xrows / 2) : xrow;
@@ -1612,7 +1644,7 @@ main(int argc, char *argv[])
 		if (vi_msg[0])
 			vi_drawmsg();
 		term_pos(xrow - xtop, 0);
-		// blaze822_seq_setcur(mails[xrow].file);
+		// blaze822_seq_setcur(main_seq.mails[xrow].file);
 	}
 
 	term_pos(xrows, 0);
