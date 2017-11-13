@@ -85,15 +85,20 @@ static char *mscan_argv[] = {
 	(char *)0,
 };
 
-static int ec_quit(struct exarg *);
+static struct mark {
+	int num;
+} marks[26*2];
+
+static int ec_exec(struct exarg *);
+static int ec_glob(struct exarg *);
+static int ec_grep(struct exarg *);
+static int ec_linenum(struct exarg *);
+static int ec_mark(struct exarg *);
+static int ec_null(struct exarg *);
 static int ec_print(struct exarg *);
+static int ec_quit(struct exarg *);
 static int ec_read(struct exarg *);
 static int ec_write(struct exarg *);
-static int ec_glob(struct exarg *);
-static int ec_linenum(struct exarg *);
-static int ec_exec(struct exarg *);
-static int ec_grep(struct exarg *);
-static int ec_null(struct exarg *);
 
 static struct excmd excmds[] = {
 	{ "q", "quit", ec_quit },
@@ -104,6 +109,7 @@ static struct excmd excmds[] = {
 	{ "w!", "write!", ec_write },
 	{ "v", "vglobal", ec_glob },
 	{ "g", "grep", ec_grep },
+	{ "ma", "mark", ec_mark },
 	{ "=", "=", ec_linenum },
 	{ "!", "!", ec_exec },
 	{ "", "", ec_null },
@@ -172,6 +178,8 @@ static int ui_search(KeyArg *, void *);
 static int ui_scroll(KeyArg *, void *);
 static int ui_suspend(KeyArg *, void *);
 static int ui_null(KeyArg *, void *);
+static int ui_jumpmark(KeyArg *, void *);
+static int ui_mark(KeyArg *, void *);
 
 static int ui_null(KeyArg *_, void *__) { (void)(_); (void)(__); return 1;};
 
@@ -201,6 +209,9 @@ static KeyNode keytree[] = {
 	MAP_FUN('?', KEY_MOTION, ui_search, {.i=SEARCH_PROMPT|SEARCH_UP}),
 	MAP_FUN('n', KEY_MOTION, ui_search, {.i=SEARCH_DOWN}),
 	MAP_FUN('N', KEY_MOTION, ui_search, {.i=SEARCH_UP}),
+	MAP_FUN('m', 0, ui_mark, {0}),
+	MAP_FUN('`', KEY_MOTION, ui_jumpmark, {0}),
+	MAP_FUN('\'', KEY_MOTION, ui_jumpmark, {0}),
 	MAP_FUN(TK_CTL('z'), 0, ui_suspend, {0}),
 	MAP_FUN(TK_CTL('b'), 0, ui_scroll, {.i=SCROLL_PAGE_UP}),
 	MAP_FUN(TK_CTL('f'), 0, ui_scroll, {.i=SCROLL_PAGE_DOWN}),
@@ -937,6 +948,40 @@ ec_print(struct exarg *arg)
 	return 0;
 }
 
+static int
+setmark(int c, int pos)
+{
+	int i;
+	if (!isalpha(c))
+		return 1;
+	i = c > 'Z' ? c - 'a' : c - 'A' + 26;
+	fprintf(stderr, "setmark: %c %d pos=%d\n", c, i, pos);
+	marks[i].num = pos;
+	return 0;
+}
+
+static int
+ec_mark(struct exarg *arg)
+{
+	int r1, r2;
+	char *s;
+
+	// default to current mail
+	r1 = arg->r1 ? arg->r1 : xrow+1;
+	r2 = arg->r2 ? arg->r2 : r1;
+	// dont allow backwards ranges
+	if (r2 - r1 < 0)
+		return 1;
+
+	s = arg->args;
+	while (isspace(*s))
+		s++;
+	if (*s == '\0' || s[1] != '\0')
+		return 1;
+
+	return setmark(*s, MAX(r1, r2));
+}
+
 static size_t
 ex_num(char *s, int *r)
 {
@@ -1394,6 +1439,36 @@ ui_scroll(KeyArg *karg, void *arg)
 		return vi_scrollforeward(MAX(1, vi_arg1));
 	}
 	return 1;
+}
+
+static int
+ui_mark(KeyArg *karg, void *arg)
+{
+	int c;
+	fprintf(stderr, "ui_mark: wait\n");
+	c = vi_read();
+	if (c == '\n' || TK_INT(c))
+		return 1;
+	return setmark(c, nrow);
+}
+
+static int
+ui_jumpmark(KeyArg *karg, void *arg)
+{
+	int c, i;
+	fprintf(stderr, "ui_jumpmark: wait\n");
+	c = vi_read();
+	if (c == '\n' || TK_INT(c) || !isalpha(c))
+		return 1;
+	i = c > 'Z' ? c - 'a' : c - 'A' + 26;
+	fprintf(stderr, "ui_jumpmark: %c %d\n", c, i);
+	if (marks[i].num == -1) {
+		snprintf(vi_msg, sizeof(vi_msg), "Mark not set");
+		return 1;
+	}
+	nrow = marks[i].num;
+	mv = 1;
+	return 0;
 }
 
 static int
