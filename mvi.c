@@ -801,12 +801,6 @@ vi_prompt(char *msg, int *kbmap)
 	return 0;
 }
 
-/* show an ex message */
-void ex_show(char *msg)
-{
-	snprintf(vi_msg, sizeof(vi_msg), "%s", msg);
-}
-
 static int
 ec_quit(struct exarg *arg)
 {
@@ -1273,9 +1267,9 @@ vi_wait()
 		term_str("[enter to continue]");
 		while ((c = vi_read()) != '\n' && !TK_INT(c))
 			;
+		vi_msg[0] = '\0';
 	}
 	printed = 0;
-	vi_msg[0] = '\0';
 }
 
 void
