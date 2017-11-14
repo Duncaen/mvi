@@ -1023,23 +1023,23 @@ ex_mmsg(char *s, int *r1, int *r2)
 			break;
 		case '.':
 			p++;
-			n = xrow+1;
+			n = nrow+1;
 			break;
 		case '+':
 			p++;
 			p += ex_num(p, &m);
 			if (!m) m = 1;
-			n = n ? n+m : xrow+1+m;
+			n = n ? n+m : nrow+1+m;
 			break;
 		case '-':
 			p++;
 			p += ex_num(p, &m);
 			if (!m) m = 1;
-			n = n ? n-m : xrow+1-m;
+			n = n ? n-m : nrow+1-m;
 			break;
 		case '^':
 			p++;
-			i = (n ? n : xrow+1)-1;
+			i = (n ? n : nrow+1)-1;
 			m = main_seq.mails[i].depth;
 			if (m > 0)
 				for (; i > 0; i--)
@@ -1049,7 +1049,7 @@ ex_mmsg(char *s, int *r1, int *r2)
 			break;
 		case '_':
 			p++;
-			i = (*r1 ? *r1 : n ? n : xrow+1)-1;
+			i = (*r1 ? *r1 : n ? n : nrow+1)-1;
 			m = main_seq.mails[i].depth;
 			for (i += 1; i < main_seq.num; i++)
 				if (main_seq.mails[i].depth <= m) {
@@ -1519,15 +1519,23 @@ match_tree(KeyNode *node, KeyArg *arg)
 		if (n->op == KEY_OP) {
 			arg->state = KEY_OP;
 			arg->opnode = n;
+			vi_arg2 = vi_prefix();
 			return match_tree(keytree, arg);
 		}
 		fprintf(stderr, "matched: %c\n", c);
+		// XXX: dont repeat every command
+		int cnt = (vi_arg1 ? vi_arg1 : 1) * (vi_arg2 ? vi_arg2 : 1);
+		fprintf(stderr, "match_tree: cnt=%d\n", cnt);
 		switch (n->t) {
 		case MAP_CMD:
-			r = ex_command(n->cmd);
+			for (j = 0; j < cnt; j++)
+				if ((r = ex_command(n->cmd)))
+					break;
 			break;
 		case MAP_FN:
-			r = n->fn(arg, (void *)&n->arg);
+			for (j = 0; j < cnt; j++)
+				if ((r = n->fn(arg, (void *)&n->arg)))
+					break;
 			break;
 		default:
 			return 1;
