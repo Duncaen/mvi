@@ -205,6 +205,8 @@ static KeyNode keytree[] = {
 			MAP_NULL
 		),
 	),
+	MAP_CMD('^', KEY_MOTION, "^"),
+	MAP_CMD('_', KEY_MOTION, "_"),
 	MAP_CMD('p', KEY_OP, "w !mshow"),
 	MAP_CMD('d', KEY_OP, "!mflag -vS"),
 	MAP_CMD('u', KEY_OP, "!mflag -vs"),
@@ -212,6 +214,8 @@ static KeyNode keytree[] = {
 	MAP_CMD('T', KEY_OP, "!mflag -vT"),
 	MAP_CMD('j', KEY_MOTION, "+"),
 	MAP_CMD('k', KEY_MOTION, "-"),
+	MAP_CMD(TK_CTL('n'), KEY_MOTION, "+"),
+	MAP_CMD(TK_CTL('p'), KEY_MOTION, "-"),
 	MAP_FUN(':', 0, ui_excmd, {0}),
 	MAP_FUN('/', KEY_MOTION, ui_search, {.i=SEARCH_PROMPT|SEARCH_DOWN}),
 	MAP_FUN('?', KEY_MOTION, ui_search, {.i=SEARCH_PROMPT|SEARCH_UP}),
@@ -384,57 +388,6 @@ seq_get(struct seq *sq, char **dst, int r1, int r2)
 	}
 	return sbuf_done(ibuf, dst);
 }
-
-#if 0
-int
-seq_next_thread(int i)
-{
-	int j;
-	for (j = i; j < num; j++) {
-		/* fprintf(stderr, "]: dr=%ld di=%ld\n", mails[i].depth, mails[i].depth); */
-		if (mails[i].depth < mails[j].depth) {
-			return j > num ? num : j;
-		} else if (mails[i].depth > mails[j].depth) {
-			break;
-		}
-	}
-	return 0;
-}
-
-int
-seq_prev_thread(int i)
-{
-	int j;
-	for (j = i; j >= 0; j--) {
-		if (mails[i].depth > mails[j].depth) {
-			return j > num ? num : j;
-		} else if (mails[i].depth < mails[j].depth) {
-			break;
-		}
-	}
-	return 0;
-}
-
-int
-seq_next_toplevel(int i)
-{
-	int j;
-	for (j = i+2; j < num; j++)
-		if (mails[j].depth == 0)
-			break;
-	return j == num ? num : j;
-}
-
-int
-seq_prev_toplevel(int i)
-{
-	int j;
-	for (j = i-1; j >= 0; j--)
-		if (mails[j].depth == 0)
-			break;
-	return j == 0 ? 0 : j;
-}
-#endif
 
 static pid_t
 cmd_exec(char *argv[], int *ifd, int *ofd, int *efd)
@@ -1034,7 +987,6 @@ ex_num(char *s, int *r)
 	l = 1;
 	n = 0;
 	c = *s++;
-	fprintf(stderr, "ex_num: c=%c\n", c);
 	if (isdigit(c)) {
 		while (isdigit(c)) {
 			n = n * 10 + c - '0';
@@ -1044,18 +996,31 @@ ex_num(char *s, int *r)
 	}
 	l--;
 	*r = n;
-	fprintf(stderr, "ex_num: l=%d n=%d\n", l, n);
 	return l;
 }
 
 static ssize_t
-ex_mmsg(char *s, int *r) 
+ex_mmsg(char *s, int *r1, int *r2)
 {
-	int n = 0, m = 0;
+	int i = 0, n = 0, m = 0, o = 0, *r;
 	char *p;
+	*r1 = 0;
+	*r2 = 0;
 	p = s;
+	r = r1;
 	while (*p)
 		switch (*p) {
+		case ':':
+			p++;
+			if (r == r2) goto ret;
+			*r = n;
+			r = r2;
+			n = 0;
+			break;
+		case '$':
+			p++;
+			n = main_seq.num+1;
+			break;
 		case '.':
 			p++;
 			n = xrow+1;
@@ -1072,6 +1037,28 @@ ex_mmsg(char *s, int *r)
 			if (!m) m = 1;
 			n = n ? n-m : xrow+1-m;
 			break;
+		case '^':
+			p++;
+			i = (n ? n : xrow+1)-1;
+			m = main_seq.mails[i].depth;
+			if (m > 0)
+				for (; i > 0; i--)
+					if (main_seq.mails[i].depth < m)
+						break;
+			n = i+1;
+			break;
+		case '_':
+			p++;
+			i = (*r1 ? *r1 : n ? n : xrow+1)-1;
+			m = main_seq.mails[i].depth;
+			for (i += 1; i < main_seq.num; i++)
+				if (main_seq.mails[i].depth <= m) {
+					break;
+				}
+			n = i;
+			*r2 = n;
+			r = r2;
+			break;
 		default:
 			p += ex_num(p, &m);
 			if (!m) goto ret;
@@ -1079,6 +1066,9 @@ ex_mmsg(char *s, int *r)
 		}
 ret:
 	*r = n;
+	// handle start:stop where stop is empty
+	if (r == r2 && n == 0)
+		*r2 = main_seq.num+1;
 	return p-s;
 }
 
@@ -1086,19 +1076,13 @@ static ssize_t
 ex_range(char *s, int *r1, int *r2)
 {
 	char *p = s;
-	if (*s == '%') {
+	switch (*s) {
+	case '%':
 		*r1 = 1;
 		*r2 = main_seq.num-1;
 		return 1;
 	}
-	fprintf(stderr, "ex_range1: p=%s\n", p);
-	p += ex_mmsg(p, r1);
-	fprintf(stderr, "ex_range2: p=%s\n", p);
-	if (*p == ':') {
-		p++;
-		p += ex_mmsg(p, r2);
-	}
-	fprintf(stderr, "ex_range3: p=%s\n", p);
+	p += ex_mmsg(p, r1, r2);
 	return p-s;
 }
 
@@ -1124,19 +1108,18 @@ ex_command(char *s)
 
 		fprintf(stderr, "ex_command: %s r1=%d r2=%d\n", p, arg.r1, arg.r2);
 		p1 = p;
-		while (isalpha(*p1))
-			p1++;
+		while (isalpha(*p1++)) ;
 		if (*p1 == '!' || *p1 == '=')
 			p1++;
 		if ((size_t)(p1-p) > sizeof buf)
 			return 1;
-		if ((size_t)(p1-p) != 0)
+		if ((size_t)(p1-p) > 0)
 			strncpy(buf, p, p1-p);
 		else
 			buf[0] = '\0';
 		arg.cmd = buf;
 		arg.args = p1;
-		fprintf(stderr, "ex_command: %s\n", buf);
+		fprintf(stderr, "ex_command: %s %d\n", buf, p1-p);
 
 		for (i = 0; i < LEN(excmds); i++) {
 			if (!strcmp(excmds[i].abbr, buf) ||
