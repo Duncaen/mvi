@@ -247,6 +247,9 @@ static KeyNode keytree[] = {
 static int m_pipe(int, int, char *);
 static int m_exec(int, int, char *);
 
+static int cmd_pipe(char *[], char *, size_t, char **, size_t *, char **, size_t *);
+static int cmd_pipesh(char *, char *, size_t, char **, size_t *, char **, size_t *);
+
 static void
 sbuf_extend(struct sbuf *sb, int newsz)
 {
@@ -380,13 +383,40 @@ static size_t
 seq_get(struct seq *sq, char **dst, int r1, int r2)
 {
 	int i;
-	struct sbuf *ibuf = sbuf_make();
+	struct sbuf *ibuf;
 
+	r1 = r1 ? r1-1 : 0;
+	r2 = r2 ? r2-1 : sq->num;
+
+	ibuf = sbuf_make();
 	for (i = r1; i <= r2 && i < sq->num; i++) {
 		sbuf_str(ibuf, sq->mails[i].file);
 		sbuf_chr(ibuf, '\n');
 	}
 	return sbuf_done(ibuf, dst);
+}
+
+static int
+seq_scan(struct seq *seq, int r1, int r2)
+{
+	int i;
+	char *input, *output, *error;
+	size_t inlen, outlen, errlen;
+
+	inlen = seq_get(&main_seq, &input, r1, r2);
+	cmd_pipe(mscan_argv, input, inlen, &output, &outlen, &error, &errlen);
+
+	i = r1 ? r1-1 : 0;
+
+	char *p = output, *d;
+	while (p < output+outlen && (d = strchr(p, '\n'))) {
+		*d = '\0';
+		seq->mails[i++].scan = strdup(p);
+		fprintf(stderr, "> %s\n", p);
+		p = d+1;
+	}
+
+	return 0;
 }
 
 static pid_t
@@ -661,6 +691,7 @@ term_init()
 	sprintf(str, "%d", rows);
 	setenv("LINES", str, 0);
 }
+
 void
 term_done()
 {
@@ -870,7 +901,7 @@ ec_grep(struct exarg *arg)
 
 	// default to all mails
 	if (!arg->r1 && !arg->r2) {
-		r1 = 0, r2 = main_seq.num;
+		r1 = 1, r2 = main_seq.num;
 	} else {
 		r1 = arg->r1, r2 = arg->r2;
 	}
@@ -880,16 +911,15 @@ ec_grep(struct exarg *arg)
 		return 1;
 
 	if (*arg->args == '/') {
+		// :g/pattern/
 		l = parsepattern(buf, sizeof buf, arg->args);
 		fprintf(stderr, "parsepattern: l=%d\n", l);
 		if (!l)
 			return 1;
 		pat = buf;
 	} else {
-		// assume the command is :grep pattern
+		// assume the command is :grep /pattern/
 		pat = arg->args;
-		while (isspace(*pat))
-			pat++;
 	}
 
 	int r;
@@ -900,7 +930,6 @@ ec_grep(struct exarg *arg)
 
 	argv = (char*[]){"magrep", pat, (void*)0};
 	inlen = seq_get(&main_seq, &input, r1, r2);
-
 
 	term_pos(xrows, 0);
 	term_done();
@@ -916,7 +945,7 @@ ec_null(struct exarg *arg)
 {
 	// no command, do a motion
 	nrow = MAX(arg->r1, arg->r2);
-	nrow = MAX(MIN(nrow - 1, main_seq.num - 1), 0);
+	nrow = MAX(MIN(nrow-1, main_seq.num), 0);
 	mv = 1;
 	return 0;
 }
@@ -924,7 +953,9 @@ ec_null(struct exarg *arg)
 static int
 ec_print(struct exarg *arg)
 {
+	size_t outlen;
 	int r1, r2;
+	char *output;
 
 	// default to current mail
 	r1 = arg->r1 ? arg->r1 : xrow+1;
@@ -933,14 +964,15 @@ ec_print(struct exarg *arg)
 	if (r2 - r1 < 0)
 		return 1;
 
-	printed++;
+	if ((outlen = seq_get(&main_seq, &output, r1, r2)) == 0)
+		return 1;
+
 	term_pos(xrows, 0);
 	term_str("\n");
-	for (int i = r1-1; i < r2; i++) {
-		term_str(main_seq.mails[i].file);
-		term_str("\n");
-	}
+	term_str(output);
+	printed++;
 
+	free(output);
 	return 0;
 }
 
@@ -951,7 +983,6 @@ setmark(int c, int pos)
 	if (!isalpha(c))
 		return 1;
 	i = c > 'Z' ? c - 'a' : c - 'A' + 26;
-	fprintf(stderr, "setmark: %c %d pos=%d\n", c, i, pos);
 	marks[i].num = pos;
 	return 0;
 }
@@ -960,7 +991,6 @@ static int
 ec_mark(struct exarg *arg)
 {
 	int r1, r2;
-	char *s;
 
 	// default to current mail
 	r1 = arg->r1 ? arg->r1 : xrow+1;
@@ -969,13 +999,10 @@ ec_mark(struct exarg *arg)
 	if (r2 - r1 < 0)
 		return 1;
 
-	s = arg->args;
-	while (isspace(*s))
-		s++;
-	if (*s == '\0' || s[1] != '\0')
+	if (*arg->args == '\0' || arg->args[1] != '\0')
 		return 1;
 
-	return setmark(*s, MAX(r1, r2));
+	return setmark(*arg->args, MAX(r1, r2));
 }
 
 static size_t
@@ -1002,10 +1029,11 @@ ex_num(char *s, int *r)
 static ssize_t
 ex_mmsg(char *s, int *r1, int *r2)
 {
-	int i = 0, n = 0, m = 0, o = 0, *r;
+	int i, n, m, *r;
 	char *p;
 	*r1 = 0;
 	*r2 = 0;
+	n = 0;
 	p = s;
 	r = r1;
 	while (*p)
@@ -1019,7 +1047,7 @@ ex_mmsg(char *s, int *r1, int *r2)
 			break;
 		case '$':
 			p++;
-			n = main_seq.num+1;
+			n = main_seq.num;
 			break;
 		case '.':
 			p++;
@@ -1060,15 +1088,16 @@ ex_mmsg(char *s, int *r1, int *r2)
 			r = r2;
 			break;
 		default:
-			p += ex_num(p, &m);
-			if (!m) goto ret;
+			if ((i = ex_num(p, &m)) == 0)
+				goto ret;
+			p += i;
 			n += m;
 		}
 ret:
 	*r = n;
 	// handle start:stop where stop is empty
 	if (r == r2 && n == 0)
-		*r2 = main_seq.num+1;
+		*r2 = main_seq.num;
 	return p-s;
 }
 
@@ -1079,7 +1108,7 @@ ex_range(char *s, int *r1, int *r2)
 	switch (*s) {
 	case '%':
 		*r1 = 1;
-		*r2 = main_seq.num-1;
+		*r2 = main_seq.num;
 		return 1;
 	}
 	p += ex_mmsg(p, r1, r2);
@@ -1091,7 +1120,7 @@ ex_command(char *s)
 {
 	char buf[128];
 	struct exarg arg;
-	size_t i;
+	size_t i, l;
 	int ret, r1, r2;
 	char *p, *p1;
 
@@ -1106,20 +1135,25 @@ ex_command(char *s)
 		arg.r1 = r1 ? MIN(MAX(r1, 1), main_seq.num) : 0;
 		arg.r2 = r2 ? MIN(MAX(r2, 1), main_seq.num) : 0;
 
-		fprintf(stderr, "ex_command: %s r1=%d r2=%d\n", p, arg.r1, arg.r2);
+		// move p1 to the beginning of arguments
 		p1 = p;
-		while (isalpha(*p1++)) ;
+		while (isalpha(*p1)) p1++;
 		if (*p1 == '!' || *p1 == '=')
 			p1++;
-		if ((size_t)(p1-p) > sizeof buf)
+
+		// copy command into buffer
+		l = p1-p;
+		if (l > sizeof buf)
 			return 1;
-		if ((size_t)(p1-p) > 0)
-			strncpy(buf, p, p1-p);
-		else
-			buf[0] = '\0';
+		if (l > 0)
+			strncpy(buf, p, l);
+		buf[l] = '\0';
 		arg.cmd = buf;
+
+		while (isspace(*p1)) p1++;
 		arg.args = p1;
-		fprintf(stderr, "ex_command: %s %d\n", buf, p1-p);
+
+		fprintf(stderr, "ex_command: %s args=%s r1=%d r2=%d\n", buf, arg.args, arg.r1, arg.r2);
 
 		for (i = 0; i < LEN(excmds); i++) {
 			if (!strcmp(excmds[i].abbr, buf) ||
@@ -1193,28 +1227,6 @@ vi_search(int c, int prompt, int dir, int cnt)
 }
 
 static int
-seq_scan(struct seq *seq, int r1, int r2)
-{
-	int i;
-	char *input, *output, *error;
-	size_t inlen, outlen, errlen;
-
-	inlen = seq_get(&main_seq, &input, r1, r2);
-	cmd_pipe(mscan_argv, input, inlen, &output, &outlen, &error, &errlen);
-
-	i = r1;
-	char *p = output, *d;
-	while (p < output+outlen && (d = strchr(p, '\n'))) {
-		*d = '\0';
-		seq->mails[i++].scan = strdup(p);
-		fprintf(stderr, "> %s\n", p);
-		p = d+1;
-	}
-
-	return 0;
-}
-
-static int
 vi_prefix()
 {
 	int n = 0;
@@ -1274,7 +1286,7 @@ m_pipe(int r1, int r2, char *cmd)
 
 	fprintf(stderr, "mpipe <\n %s\n", output);
 
-	i = r1;
+	i = r1-1;
 	char *p = output, *d;
 	while (p < output+outlen && (d = strchr(p, '\n'))) {
 		*d = '\0';
@@ -1498,7 +1510,7 @@ match_tree(KeyNode *node, KeyArg *arg)
 	KeyNode *n;
 	size_t i;
 	int c = vi_read();
-	int r;
+	int r, j;
 	int r1, r2;
 	arg->key[arg->pos++] = c;
 	if (TK_INT(c)) {
@@ -1544,10 +1556,10 @@ match_tree(KeyNode *node, KeyArg *arg)
 		if (arg->state == KEY_OP) {
 doop:
 			// XXX: add count/prefix
-			r1 = r2 = xrow;
+			r1 = r2 = xrow+1;
 			if (mv) {
-				if (nrow < r1) r1 = nrow;
-				else r2 = nrow;
+				if (nrow < r1) r1 = nrow+1;
+				else r2 = nrow+1;
 			}
 			n = arg->opnode;
 			char buf[1024];
@@ -1586,7 +1598,7 @@ main(int argc, char *argv[])
 		seq_read(&main_seq, argc-optind, argv+optind);
 
 	term_init();
-	seq_scan(&main_seq, 0, main_seq.num);
+	seq_scan(&main_seq, 0, 0);
 
 	xtop = MAX(0, xrow - xrows / 2);
 	nlen = 1;
