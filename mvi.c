@@ -1005,14 +1005,21 @@ ec_glob(struct exarg *arg)
 		return 1;
 	fprintf(stderr, "parsepattern: buf=%s l=%d\n", buf, l);
 
-	int r;
-	char **argv;
 	char *input;
 	size_t inlen;
-	r = 0;
 
-	argv = (char*[]){"magrep", buf, (void*)0};
-	inlen = seq_get(&main_seq, &input, r1, r2);
+	if ((inlen = seq_get(&main_seq, &input, r1, r2)) < 0)
+		return 1;
+
+	int r;
+	char *argv[4];
+
+	r = 0;
+	argv[r++] = "magrep";
+	if (*arg->cmd == 'v')
+		argv[r++] = "-v";
+	argv[r++] = buf;
+	argv[r++] = (void*)0;
 
 	term_pos(xrows, 0);
 	term_done();
