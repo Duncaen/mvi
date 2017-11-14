@@ -838,6 +838,7 @@ ec_exec(struct exarg *arg)
 	r = m_pipe(arg->r1, arg->r2, arg->args);
 
 	/* printed++; */
+	mod = 1;
 	return r;
 }
 
@@ -1621,7 +1622,7 @@ main(int argc, char *argv[])
 
 		if (!match_tree(keytree, &karg)) {
 			if (mv) xrow = nrow;
-			mod = 1;
+			/* mod = 1; */
 		}
 
 		if (xrow < 0 || xrow >= main_seq.num)
