@@ -419,6 +419,110 @@ seq_scan(struct seq *seq, int r1, int r2)
 	return 0;
 }
 
+static size_t
+parsenum(char *s, int *r)
+{
+	char c;
+	int n;
+	size_t l;
+	l = 1;
+	n = 0;
+	c = *s++;
+	if (isdigit(c)) {
+		while (isdigit(c)) {
+			n = n * 10 + c - '0';
+			c = *s++;
+			l++;
+		}
+	}
+	l--;
+	*r = n;
+	return l;
+}
+
+
+static size_t
+seq_mmsg(struct seq *sq, char *s, int *r1, int *r2)
+{
+	int i, n, m, *r;
+	char *p;
+	*r1 = 0;
+	*r2 = 0;
+	n = 0;
+	p = s;
+	r = r1;
+	while (*p)
+		switch (*p) {
+		case ':':
+			p++;
+			if (r == r2) goto ret;
+			*r = n;
+			r = r2;
+			n = 0;
+			break;
+		case '$':
+			p++;
+			n = sq->num;
+			break;
+		case '.':
+			p++;
+			n = nrow+1;
+			break;
+		case '+':
+			p++;
+			p += parsenum(p, &m);
+			if (!m) m = 1;
+			n = n ? n+m : nrow+1+m;
+			break;
+		case '-':
+			p++;
+			p += parsenum(p, &m);
+			if (!m) m = 1;
+			n = n ? n-m : nrow+1-m;
+			break;
+		case '^':
+			p++;
+			i = (n ? n : nrow+1)-1;
+			m = sq->mails[i].depth;
+			if (m > 0)
+				for (; i > 0; i--)
+					if (sq->mails[i].depth < m)
+						break;
+			n = i+1;
+			break;
+		case '_':
+			p++;
+			i = (*r1 ? *r1 : n ? n : nrow+1)-1;
+			m = sq->mails[i].depth;
+			for (i += 1; i < sq->num; i++)
+				if (sq->mails[i].depth <= m) {
+					break;
+				}
+			n = i;
+			*r2 = n;
+			r = r2;
+			break;
+		case '%':
+			p++;
+			*r1 = 1;
+			r = r2;
+			n = sq->num;
+			break;
+		default:
+			if ((i = parsenum(p, &m)) == 0)
+				goto ret;
+			p += i;
+			n += m;
+		}
+ret:
+	*r = n;
+	// handle start:stop where stop is empty
+	if (r == r2 && n == 0)
+		*r2 = sq->num;
+	return p-s;
+}
+
+
 static pid_t
 cmd_exec(char *argv[], int *ifd, int *ofd, int *efd)
 {
@@ -1013,116 +1117,6 @@ ec_mark(struct exarg *arg)
 	return setmark(*arg->args, MAX(r1, r2));
 }
 
-static size_t
-ex_num(char *s, int *r)
-{
-	char c;
-	int n;
-	size_t l;
-	l = 1;
-	n = 0;
-	c = *s++;
-	if (isdigit(c)) {
-		while (isdigit(c)) {
-			n = n * 10 + c - '0';
-			c = *s++;
-			l++;
-		}
-	}
-	l--;
-	*r = n;
-	return l;
-}
-
-static ssize_t
-ex_mmsg(char *s, int *r1, int *r2)
-{
-	int i, n, m, *r;
-	char *p;
-	*r1 = 0;
-	*r2 = 0;
-	n = 0;
-	p = s;
-	r = r1;
-	while (*p)
-		switch (*p) {
-		case ':':
-			p++;
-			if (r == r2) goto ret;
-			*r = n;
-			r = r2;
-			n = 0;
-			break;
-		case '$':
-			p++;
-			n = main_seq.num;
-			break;
-		case '.':
-			p++;
-			n = nrow+1;
-			break;
-		case '+':
-			p++;
-			p += ex_num(p, &m);
-			if (!m) m = 1;
-			n = n ? n+m : nrow+1+m;
-			break;
-		case '-':
-			p++;
-			p += ex_num(p, &m);
-			if (!m) m = 1;
-			n = n ? n-m : nrow+1-m;
-			break;
-		case '^':
-			p++;
-			i = (n ? n : nrow+1)-1;
-			m = main_seq.mails[i].depth;
-			if (m > 0)
-				for (; i > 0; i--)
-					if (main_seq.mails[i].depth < m)
-						break;
-			n = i+1;
-			break;
-		case '_':
-			p++;
-			i = (*r1 ? *r1 : n ? n : nrow+1)-1;
-			m = main_seq.mails[i].depth;
-			for (i += 1; i < main_seq.num; i++)
-				if (main_seq.mails[i].depth <= m) {
-					break;
-				}
-			n = i;
-			*r2 = n;
-			r = r2;
-			break;
-		default:
-			if ((i = ex_num(p, &m)) == 0)
-				goto ret;
-			p += i;
-			n += m;
-		}
-ret:
-	*r = n;
-	// handle start:stop where stop is empty
-	if (r == r2 && n == 0)
-		*r2 = main_seq.num;
-	return p-s;
-}
-
-static ssize_t
-ex_range(char *s, int *r1, int *r2)
-{
-	char *p = s;
-	switch (*s) {
-	case '%':
-		*r1 = 1;
-		*r2 = main_seq.num;
-		return 1;
-	}
-	p += ex_mmsg(p, r1, r2);
-	return p-s;
-}
-
 static int
 ex_command(char *s)
 {
@@ -1139,7 +1133,7 @@ ex_command(char *s)
 
 	while (1) {
 		r1 = r2 = 0;
-		p += ex_range(p, &r1, &r2);
+		p += seq_mmsg(&main_seq, p, &r1, &r2);
 		arg.r1 = r1 ? MIN(MAX(r1, 1), main_seq.num) : 0;
 		arg.r2 = r2 ? MIN(MAX(r2, 1), main_seq.num) : 0;
 
