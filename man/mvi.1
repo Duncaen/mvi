@@ -61,6 +61,19 @@ threads backward.
 Move
 .Ar n
 threads forward.
+.It Sy [n] \&^
+Move
+.Ar n
+parent mails up.
+.It Sy \&_
+Move to the end of the current thread.
+.It Sy m [a-zA-Z]
+Mark the current line as character
+.Ar [a-zA-Z] .
+.It Sy ` [a-zA-Z]
+.It Sy ' [a-zA-Z]
+Return to the line marked as character
+.Ar [a-zA-Z] .
 .El
 .Sh VI TEXT INPUT COMMANDS
 The following key bindings are available in the text input mode.
@@ -76,19 +89,65 @@ Erase the last word.
 Erase entire input line.
 .El
 .Sh EX COMMANDS
+The following sections describes ex commands, where the headline is the
+usage synposis of the command with a description following.
 .Bl -tag -width Ds
-.It Sy \&! cmd [args...]
+.It Sy \&!cmd [args...]
 Execute a shell command.
 .It Sy q[uit][!]
-Exit
-.Nm .
+Exit.
 .It Sy =
 Output the current line number.
+.It Sy [msgs] ma[rk] [a-zA-Z]
+Mark the current or last message in
+.Ar msgs
+as character
+.Ar [a-zA-Z] .
+.It Sy [msgs] p[rint]
+Print the current or all lines in
+.Ar msgs .
+.It Sy [msgs] g[lobal] \&/header\&:regex\&/ [commands]
+.It Sy [msgs] v \&/header\&:regex\&/ [commands]
+Run
+.Ar commands
+on all or messages in
+.Ar msgs
+matching (or in case of
+.Ar v
+not matching)
+.Ar regex .
+See
+.Xr magrep 1
+for the
+.Ar header
+and
+.Ar pattern
+syntax.
+.It Sy [msgs]
+Move to last message in
+.Ar msgs .
+.El
+.Pp
+See
+.Xr mmsg 7
+for the message argument syntax
+.Ar ( msgs )
+for many of the commands.
+Additionally
+.Nm
+supports the following
+.Ar msgs
+shortcuts\&:
+.Bl -tag -width 3n
+.It Sq Li \&%
+refers all messages (like
+.Sq Li 1\&:\&$ ) .
 .El
 .Sh EXIT STATUS
 .Ex -std
 .Sh SEE ALSO
 .Xr ed 1 ,
+.Xr neatvi 1 ,
 .Xr vi 1 ,
 .Xr vim 1
 .Sh AUTHORS
