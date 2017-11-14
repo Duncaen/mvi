@@ -116,7 +116,7 @@ static struct excmd excmds[] = {
 	{ "w", "write", ec_write },
 	{ "w!", "write!", ec_write },
 	{ "v", "vglobal", ec_glob },
-	{ "g", "grep", ec_grep },
+	{ "g", "global", ec_glob },
 	{ "ma", "mark", ec_mark },
 	{ "=", "=", ec_linenum },
 	{ "!", "!", ec_exec },
@@ -959,73 +959,51 @@ ec_read(struct exarg *arg)
 	return 0;
 }
 
-static int
-ec_glob(struct exarg *arg)
-{
-	return 0;
-}
-
 static size_t
-parsepattern(char *buf, size_t n, char *s)
+parsepattern(char *dst, size_t n, char *s)
 {
-	char *d, *p;
+	int sep;
+	char *p;
 
-	if (strlen(s) < n)
-		return 0;
+	if (strlen(s)+1 > n)
+		return -1;
 
-	d = buf;
-
+	sep = *s;
 	// parse /magrep\/pattern/
-	for (p = s+1; *p && *p != '/'; p++) {
-		if (*p == '\\')
-			switch (p[1]) {
-			case '/':
-				p++;
-			}
-		*d = *p;
+	for (p = s+1; *p && *p != sep; p++) {
+		if (*p == '\\' && p[1] == sep)
+			p++;
+		*dst++ = *p;
 	}
-
-	// pattern has to end with a slash
-	if (*p != '/')
-		return 0;
-
-	*d++ = '\0';
+	// pattern has to end with the initial seperator
+	if (*p != sep)
+		return -1;
+	*dst++ = '\0';
 
 	return p-s;
 }
 
 static int
-ec_grep(struct exarg *arg)
+ec_glob(struct exarg *arg)
 {
 	char buf[1024];
-	char *pat;
 	size_t l;
 	int r1, r2;
 
-	fprintf(stderr, "ec_grep: cmd=%s args=%s r1=%d r2=%d\n", arg->cmd, arg->args, arg->r1, arg->r2);
+	fprintf(stderr, "ec_glob: cmd=%s args=%s r1=%d r2=%d\n", arg->cmd, arg->args, arg->r1, arg->r2);
 
 	// default to all mails
-	if (!arg->r1 && !arg->r2) {
+	if (!arg->r1 && !arg->r2)
 		r1 = 1, r2 = main_seq.num;
-	} else {
+	else
 		r1 = arg->r1, r2 = arg->r2;
-	}
-
 	// dont allow backwards ranges
 	if (r2 - r1 < 0)
 		return 1;
 
-	if (*arg->args == '/') {
-		// :g/pattern/
-		l = parsepattern(buf, sizeof buf, arg->args);
-		fprintf(stderr, "parsepattern: l=%d\n", l);
-		if (!l)
-			return 1;
-		pat = buf;
-	} else {
-		// assume the command is :grep /pattern/
-		pat = arg->args;
-	}
+	if ((l = parsepattern(buf, sizeof buf, arg->args)) < 1)
+		return 1;
+	fprintf(stderr, "parsepattern: buf=%s l=%d\n", buf, l);
 
 	int r;
 	char **argv;
@@ -1033,7 +1011,7 @@ ec_grep(struct exarg *arg)
 	size_t inlen;
 	r = 0;
 
-	argv = (char*[]){"magrep", pat, (void*)0};
+	argv = (char*[]){"magrep", buf, (void*)0};
 	inlen = seq_get(&main_seq, &input, r1, r2);
 
 	term_pos(xrows, 0);
@@ -1043,6 +1021,12 @@ ec_grep(struct exarg *arg)
 	term_init();
 
 	return r;
+}
+
+static int
+ec_grep(struct exarg *arg)
+{
+	return 0;
 }
 
 static int
