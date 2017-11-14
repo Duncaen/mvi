@@ -978,12 +978,19 @@ ec_print(struct exarg *arg)
 }
 
 static int
+markidx(int mark)
+{
+	if (!isalpha(mark))
+		return -1;
+	return mark > 'Z' ? mark - 'a' : mark - 'A' + 26;
+}
+
+static int
 setmark(int c, int pos)
 {
 	int i;
-	if (!isalpha(c))
+	if ((i = markidx(c)) < 0)
 		return 1;
-	i = c > 'Z' ? c - 'a' : c - 'A' + 26;
 	marks[i].num = pos;
 	return 0;
 }
@@ -1478,29 +1485,20 @@ ui_scroll(KeyArg *karg, void *arg)
 static int
 ui_mark(KeyArg *karg, void *arg)
 {
-	int c;
-	fprintf(stderr, "ui_mark: wait\n");
-	c = vi_read();
-	if (c == '\n' || TK_INT(c))
-		return 1;
-	return setmark(c, nrow);
+	return setmark(vi_read(), nrow);
 }
 
 static int
 ui_jumpmark(KeyArg *karg, void *arg)
 {
-	int c, i;
-	fprintf(stderr, "ui_jumpmark: wait\n");
-	c = vi_read();
-	if (c == '\n' || TK_INT(c) || !isalpha(c))
+	int i, pos;
+	if ((i = markidx(vi_read())) < 0)
 		return 1;
-	i = c > 'Z' ? c - 'a' : c - 'A' + 26;
-	fprintf(stderr, "ui_jumpmark: %c %d\n", c, i);
-	if (marks[i].num == -1) {
+	if ((pos = marks[i].num) < 0) {
 		snprintf(vi_msg, sizeof(vi_msg), "Mark not set");
 		return 1;
 	}
-	nrow = marks[i].num;
+	nrow = pos;
 	mv = 1;
 	return 0;
 }
