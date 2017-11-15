@@ -188,6 +188,7 @@ static int ui_suspend(KeyArg *, void *);
 static int ui_null(KeyArg *, void *);
 static int ui_jumpmark(KeyArg *, void *);
 static int ui_mark(KeyArg *, void *);
+static int ui_move(KeyArg *, void *);
 
 static int ui_null(KeyArg *_, void *__) { (void)(_); (void)(__); return 1;};
 
@@ -214,6 +215,7 @@ static KeyNode keytree[] = {
 	MAP_CMD('T', KEY_OP, "!mflag -vT"),
 	MAP_CMD('j', KEY_MOTION, "+"),
 	MAP_CMD('k', KEY_MOTION, "-"),
+	MAP_FUN('G', KEY_MOTION, ui_move, {0}),
 	MAP_CMD(TK_CTL('n'), KEY_MOTION, "+"),
 	MAP_CMD(TK_CTL('p'), KEY_MOTION, "-"),
 	MAP_FUN(':', 0, ui_excmd, {0}),
@@ -1476,6 +1478,17 @@ ui_search(KeyArg *karg, void *arg)
 	fprintf(stderr, "ui_search: prompt=%d dir=%d\n", prompt,dir);
 	if (vi_search(*karg->key, prompt, dir, cnt))
 		return 1; 
+	return 0;
+}
+
+static int
+ui_move(KeyArg *karg, void *arg)
+{
+	int cnt;
+	(void)arg;
+	cnt = (vi_arg1 ? vi_arg1 : 1) * (vi_arg2 ? vi_arg2 : 1);
+	nrow = (vi_arg1 || vi_arg2) ? cnt-1 : main_seq.num-1;
+	mv = 1;
 	return 0;
 }
 
