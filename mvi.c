@@ -761,6 +761,16 @@ term_read(void)
 }
 
 static void
+term_chr(char c)
+{
+	if (term_sbuf)
+		sbuf_chr(term_sbuf, c);
+	else
+		while (write(1, &c, 1) < 0 && errno == EAGAIN)
+			;
+}
+
+static void
 term_str(char *s)
 {
 	if (term_sbuf)
@@ -886,9 +896,21 @@ vi_back(int c)
 		vi_buf[vi_buflen++] = c;
 }
 
+static void
+println(char *pref, char *main, int row)
+{
+	term_record();
+	term_pos(row ? row : -1, 0);
+	term_kill();
+	if (pref)
+		term_str(pref);
+	if (main)
+		term_str(main);
+	term_commit();
+}
 
 static char *
-vi_prompt(char *msg, int *kbmap)
+prompt(char *msg, int *kbmap)
 {
 	int c;
 	int cmd_len;
@@ -908,14 +930,10 @@ vi_prompt(char *msg, int *kbmap)
 	cmd_len = 0;
 	*cmd = 0;
 
-	term_pos(xrows, 0);
-	term_kill();
 	term_str(msg);
 
 	while (1) {
-		term_pos(rows - 1, pos);
-		term_kill();
-		term_str(cmd);
+		println(msg, cmd, -1);
 		c = term_read();
 		switch (c) {
 		case TK_CTL('h'):
@@ -954,6 +972,27 @@ vi_prompt(char *msg, int *kbmap)
 	return 0;
 }
 
+static char *
+vi_prompt(char *msg, int *kbmap)
+{
+	term_pos(xrows, 0);
+	term_kill();
+	return prompt(msg, kbmap);
+}
+
+static char *
+ex_prompt(char *msg, int *kbmap)
+{
+	char *s;
+	term_pos(-1, 0);
+	term_kill();
+	s = prompt(msg, kbmap);
+	term_pos(-1, 0);
+	if (s)
+		term_chr('\n');
+	return s;
+}
+
 static int
 ec_quit(struct exarg *arg)
 {
@@ -981,8 +1020,8 @@ ec_exec(struct exarg *arg)
 	/* term_str("\n"); */
 	r = m_pipe(arg->r1, arg->r2, arg->args);
 
-	/* printed++; */
-	mod = 1;
+	printed++;
+	/* mod = 1; */
 	return r;
 }
 
@@ -1086,12 +1125,21 @@ ec_null(struct exarg *arg)
 	return 0;
 }
 
+static void
+ex_print(char *line)
+{
+	printed += 1;
+	if (line)
+		snprintf(vi_msg, sizeof(vi_msg), "%s", line);
+	if (line)
+		println(0, line, -1);
+	term_chr('\n');
+}
+
 static int
 ec_print(struct exarg *arg)
 {
-	size_t outlen;
 	int r1, r2;
-	char *output;
 
 	// default to current mail
 	r1 = arg->r1 ? arg->r1 : xrow+1;
@@ -1100,15 +1148,21 @@ ec_print(struct exarg *arg)
 	if (r2 - r1 < 0)
 		return 1;
 
-	if ((outlen = seq_buf(&main_seq, &output, r1, r2)) == 0)
-		return 1;
+	int i;
+	struct mail *m;
+	for (i = r1; i <= r2; i++) {
+		if (!(m = seq_get(&main_seq, i)))
+			continue;
+		ex_print(m->file);
+	}
+	xrow = r2;
 
-	term_pos(xrows, 0);
-	term_str("\n");
-	term_str(output);
-	printed++;
+	/* term_pos(xrows-2, 0); */
+	/* term_str(output); */
+	/* printed += r2-r1+1; */
+	/* snprintf(vi_msg, sizeof(vi_msg), "%s", output); */
+	/* println(0, output); */
 
-	free(output);
 	return 0;
 }
 
@@ -1290,7 +1344,7 @@ m_exec(int r1, int r2, char *cmd)
 	inlen = seq_buf(&main_seq, &input, r1, r2);
 	r = cmd_pipesh(cmd, input, inlen, 0, 0, 0, 0);
 
-	printed++;
+	printed += 2;
 	term_init();
 	return r;
 }
@@ -1375,7 +1429,7 @@ void
 vi_wait()
 {
 	int c;
-	if (printed >= 1) {
+	if (printed > 1) {
 		term_pos(xrows, 0);
 		term_kill();
 		term_str("[enter to continue]");
@@ -1389,6 +1443,12 @@ vi_wait()
 void
 vi_drawmsg()
 {
+	size_t l;
+	fprintf(stderr,"vi_dramsg: printed=%d\n", printed);
+	if ((l = strlen(vi_msg)-1) <= 0)
+		return;
+	if (vi_msg[l] == '\n')
+		vi_msg[l] = '\0';
 	term_pos(xrows, 0);
 	term_kill();
 	term_str(vi_msg);
@@ -1460,11 +1520,11 @@ ui_excmd(KeyArg *karg, void *arg)
 	char *cmd;
 	int r;
 	r = 1;
-	mod = 1;
 	cmd = vi_prompt(":", 0);
 	if (cmd)
 		r = ex_command(cmd);
 	free(cmd);
+	mod = 1;
 	return r;
 }
 
@@ -1617,24 +1677,9 @@ doop:
 	return 1;
 }
 
-int
-main(int argc, char *argv[])
+static int
+vi(int argc, char *argv[])
 {
-	int c;
-
-	while ((c = getopt(argc, argv, "")) != -1)
-		switch(c) {
-		default:
-			fprintf(stderr,
-			    "Usage: mvi\n");
-			exit(1);
-		}
-
-	if (argc == optind && isatty(0))
-		seq_read(&main_seq, 0, 0);
-	else
-		seq_read(&main_seq, argc-optind, argv+optind);
-
 	term_init();
 	seq_scan(&main_seq, 0, 0);
 
@@ -1691,6 +1736,56 @@ main(int argc, char *argv[])
 	term_pos(xrows, 0);
 	term_kill();
 	term_done();
-
 	return 0;
+}
+
+static int
+ex(int argc, char *argv[])
+{
+	term_init();
+	while (!quit) {
+		nrow = xrow;
+		orow = xrow;
+
+		char *cmd = ex_prompt(":", 0);
+		if (!cmd)
+			continue;
+		if (ex_command(cmd))
+			fprintf(stderr, "ex: err");
+		free(cmd);
+		if (mv)
+			xrow = nrow;
+		if (xrow < 0 || xrow >= main_seq.num)
+			xrow = main_seq.num ? main_seq.num - 1 : 0;
+	}
+	term_kill();
+	term_done();
+	return 0;
+}
+
+int
+main(int argc, char *argv[])
+{
+	int c;
+	int exmode;
+
+	exmode = 0;
+
+	while ((c = getopt(argc, argv, "ev")) != -1)
+		switch(c) {
+		case 'e': exmode = 1; break;
+		case 'v': exmode = 0; break;
+		default:
+			fprintf(stderr,
+			    "Usage: mex [-ev]\n"
+			    "Usage: mvi [-ev]\n");
+			exit(1);
+		}
+
+	if (argc == optind && isatty(0))
+		seq_read(&main_seq, 0, 0);
+	else
+		seq_read(&main_seq, argc-optind, argv+optind);
+
+	return exmode ? ex(argc, argv) : vi(argc, argv);
 }
