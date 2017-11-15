@@ -378,9 +378,16 @@ seq_read(struct seq *sq, int argc, char *argv[])
 		blaze822_loop(argc, argv, addcb);
 }
 
+static struct mail *
+seq_get(struct seq *sq, int i)
+{
+	if (--i > sq->num || i < 0)
+		return 0;
+	return &sq->mails[i];
+}
 
 static size_t
-seq_get(struct seq *sq, char **dst, int r1, int r2)
+seq_buf(struct seq *sq, char **dst, int r1, int r2)
 {
 	int i;
 	struct sbuf *ibuf;
@@ -403,7 +410,7 @@ seq_scan(struct seq *seq, int r1, int r2)
 	char *input, *output, *error;
 	size_t inlen, outlen, errlen;
 
-	inlen = seq_get(&main_seq, &input, r1, r2);
+	inlen = seq_buf(&main_seq, &input, r1, r2);
 	cmd_pipe(mscan_argv, input, inlen, &output, &outlen, &error, &errlen);
 
 	i = r1 ? r1-1 : 0;
@@ -440,6 +447,49 @@ parsenum(char *s, int *r)
 	return l;
 }
 
+static int
+seq_parent(struct seq *sq, int start)
+{
+	int i, maxdepth;
+	struct mail *m;
+
+	i = (start ? start : nrow+1);
+	if ((m = seq_get(sq, i)) == 0)
+		return;
+
+	maxdepth = m->depth;
+	if (maxdepth < 1)
+		return start;
+
+	for (; i > 0; i--) {
+		if ((m = seq_get(sq, i)) == 0)
+			return start;
+		if (seq_get(sq, i)->depth < maxdepth)
+			break;
+	}
+ret:
+	return i;
+}
+
+static int
+seq_subthread(struct seq *sq, int start)
+{
+	int i, mindepth;
+	struct mail *m;
+
+	i = (start ? start : nrow+1);
+	if ((m = seq_get(sq, i)) == 0)
+		return start;
+
+	mindepth = m->depth;
+	for (i+=1; i <= sq->num; i++) {
+		if ((m = seq_get(sq, i)) == 0)
+			return start;
+		if (m->depth <= mindepth)
+			break;
+	}
+	return i-1;
+}
 
 static size_t
 seq_mmsg(struct seq *sq, char *s, int *r1, int *r2)
@@ -482,25 +532,13 @@ seq_mmsg(struct seq *sq, char *s, int *r1, int *r2)
 			break;
 		case '^':
 			p++;
-			i = (n ? n : nrow+1)-1;
-			m = sq->mails[i].depth;
-			if (m > 0)
-				for (; i > 0; i--)
-					if (sq->mails[i].depth < m)
-						break;
-			n = i+1;
+			n = seq_parent(sq, n);
 			break;
 		case '_':
 			p++;
-			i = (*r1 ? *r1 : n ? n : nrow+1)-1;
-			m = sq->mails[i].depth;
-			for (i += 1; i < sq->num; i++)
-				if (sq->mails[i].depth <= m) {
-					break;
-				}
-			n = i;
-			*r2 = n;
+			*r = n;
 			r = r2;
+			n = seq_subthread(sq, n);
 			break;
 		case '%':
 			p++;
@@ -1008,7 +1046,7 @@ ec_glob(struct exarg *arg)
 	char *input;
 	size_t inlen;
 
-	if ((inlen = seq_get(&main_seq, &input, r1, r2)) < 0)
+	if ((inlen = seq_buf(&main_seq, &input, r1, r2)) < 0)
 		return 1;
 
 	int r;
@@ -1060,7 +1098,7 @@ ec_print(struct exarg *arg)
 	if (r2 - r1 < 0)
 		return 1;
 
-	if ((outlen = seq_get(&main_seq, &output, r1, r2)) == 0)
+	if ((outlen = seq_buf(&main_seq, &output, r1, r2)) == 0)
 		return 1;
 
 	term_pos(xrows, 0);
@@ -1173,7 +1211,7 @@ vi_search(int c, int prompt, int dir, int cnt)
 {
 	int i, j;
 	int res = nrow;
-
+#if 0
 	if (prompt) {
 		char sign[2] = { c, 0 };
 		char *kw = vi_prompt(sign, 0);
@@ -1217,6 +1255,7 @@ vi_search(int c, int prompt, int dir, int cnt)
 		
 	snprintf(vi_msg, sizeof(vi_msg), "\"%s\" not found", search_kwd);
 	return 1;
+#endif
 }
 
 static int
@@ -1238,7 +1277,6 @@ static int
 m_exec(int r1, int r2, char *cmd)
 {
 	int i, r;
-	struct sbuf *ibuf = sbuf_make();
 	char *input;
 	size_t inlen;
 
@@ -1247,12 +1285,7 @@ m_exec(int r1, int r2, char *cmd)
 	term_pos(xrows, 0);
 	term_done();
 
-	for (i = r1; i <= r2 && i < main_seq.num; i++) {
-		sbuf_str(ibuf, main_seq.mails[i].file);
-		sbuf_chr(ibuf, '\n');
-	}
-	inlen = sbuf_done(ibuf, &input);
-
+	inlen = seq_buf(&main_seq, &input, r1, r2);
 	r = cmd_pipesh(cmd, input, inlen, 0, 0, 0, 0);
 
 	printed++;
@@ -1263,15 +1296,16 @@ m_exec(int r1, int r2, char *cmd)
 static int
 m_pipe(int r1, int r2, char *cmd)
 {
+	size_t inlen, outlen, errlen;
 	int i, r;
 	char *input, *output, *error;
-	size_t inlen, outlen, errlen;
+	struct mail *m;
 
 	r = 0;
 
 	fprintf(stderr, "mpipe r1=%d r2=%d\n", r1, r2);
 
-	inlen = seq_get(&main_seq, &input, r1, r2);
+	inlen = seq_buf(&main_seq, &input, r1, r2);
 
 	fprintf(stderr, "mpipe >\n %s\n", input);
 
@@ -1279,13 +1313,16 @@ m_pipe(int r1, int r2, char *cmd)
 
 	fprintf(stderr, "mpipe <\n %s\n", output);
 
-	i = r1-1;
+	i = r1;
 	char *p = output, *d;
 	while (p < output+outlen && (d = strchr(p, '\n'))) {
 		*d = '\0';
-		fprintf(stderr, "old=%s\n", main_seq.mails[i].file);
-		fprintf(stderr, "new=%s\n", p);
-		main_seq.mails[i].file = strdup(p);
+		if ((m = seq_get(&main_seq, i))) {
+			fprintf(stderr, "old=%s\n", m->file);
+			fprintf(stderr, "new=%s\n", p);
+			free(m->file);
+			m->file = strdup(p);
+		}
 		i++;
 		p = d+1;
 	}
@@ -1296,11 +1333,15 @@ m_pipe(int r1, int r2, char *cmd)
 void
 draw_row(int row)
 {
-	char *s = 0;
-	if (row < main_seq.num)
-		s = main_seq.mails[row].scan;
+	struct mail *m;
+	char *s;
+
+	s = 0;
+	if ((m = seq_get(&main_seq, row+1)))
+		s = m->scan;
 
 	/* fprintf(stderr, "draw_row row=%d xrow=%d\n", row, xrow); */
+
 	term_pos(row - xtop, 0);
 	term_kill();
 	if (1 && s) {// draw numbers
