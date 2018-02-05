@@ -107,6 +107,7 @@ static int ec_print(struct exarg *);
 static int ec_quit(struct exarg *);
 static int ec_read(struct exarg *);
 static int ec_write(struct exarg *);
+static int ec_exit(struct exarg *);
 
 static struct excmd excmds[] = {
 	{ "q", "quit", ec_quit },
@@ -117,6 +118,7 @@ static struct excmd excmds[] = {
 	{ "w!", "write!", ec_write },
 	{ "v", "vglobal", ec_glob },
 	{ "g", "global", ec_glob },
+	{ "x", "exit", ec_exit },
 	{ "ma", "mark", ec_mark },
 	{ "=", "=", ec_linenum },
 	{ "!", "!", ec_exec },
@@ -245,6 +247,10 @@ static KeyNode keytree[] = {
 		MAP_CMD('D', 0, "%!msort -rd"),
 		MAP_CMD('s', 0, "%!msort -s"),
 		MAP_CMD('S', 0, "%!msort -rs"),
+		MAP_NULL
+	),
+	MAP_SUB('Z',
+		MAP_CMD('Z', 0, "x"),
 		MAP_NULL
 	),
 	MAP_NULL
@@ -1033,6 +1039,15 @@ static int
 ec_write(struct exarg *arg)
 {
 	fprintf(stderr, "ec_write: cmd=%s args=%s r1=%d r2=%d\n", arg->cmd, arg->args, arg->r1, arg->r2);
+	return 0;
+}
+
+static int
+ec_exit(struct exarg *arg)
+{
+	fprintf(stderr, "ec_exit: cmd=%s args=%s r1=%d r2=%d\n", arg->cmd, arg->args, arg->r1, arg->r2);
+	ec_write(arg);
+	ec_quit(arg);
 	return 0;
 }
 
