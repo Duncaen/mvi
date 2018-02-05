@@ -215,7 +215,11 @@ static KeyNode keytree[] = {
 	MAP_CMD('T', KEY_OP, "!mflag -vT"),
 	MAP_CMD('j', KEY_MOTION, "+"),
 	MAP_CMD('k', KEY_MOTION, "-"),
-	MAP_FUN('G', KEY_MOTION, ui_move, {0}),
+	MAP_FUN('G', KEY_MOTION, ui_move, -1),
+	MAP_SUB('g',
+		MAP_FUN('g', KEY_MOTION, ui_move, 0),
+		MAP_NULL
+	),
 	MAP_CMD(TK_CTL('n'), KEY_MOTION, "+"),
 	MAP_CMD(TK_CTL('p'), KEY_MOTION, "-"),
 	MAP_FUN(':', 0, ui_excmd, {0}),
@@ -1545,10 +1549,11 @@ static int
 ui_move(KeyArg *karg, void *arg)
 {
 	int cnt;
-	(void)arg;
+	nrow = *((int *)arg);
+	mv = 1;
+	if (nrow != -1) return 0;
 	cnt = (vi_arg1 ? vi_arg1 : 1) * (vi_arg2 ? vi_arg2 : 1);
 	nrow = (vi_arg1 || vi_arg2) ? cnt-1 : main_seq.num-1;
-	mv = 1;
 	return 0;
 }
 
