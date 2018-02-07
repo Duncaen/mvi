@@ -50,6 +50,7 @@ struct seq {
 struct exarg {
 	int r1;
 	int r2;
+	struct seq *sq;
 	char *cmd;
 	char *args;
 };
@@ -187,12 +188,9 @@ static int ui_excmd(KeyArg *, void *);
 static int ui_search(KeyArg *, void *);
 static int ui_scroll(KeyArg *, void *);
 static int ui_suspend(KeyArg *, void *);
-static int ui_null(KeyArg *, void *);
 static int ui_jumpmark(KeyArg *, void *);
 static int ui_mark(KeyArg *, void *);
 static int ui_move(KeyArg *, void *);
-
-static int ui_null(KeyArg *_, void *__) { (void)(_); (void)(__); return 1;};
 
 static KeyNode keytree[] = {
 	MAP_SUB(TK_ESC,
@@ -256,11 +254,13 @@ static KeyNode keytree[] = {
 	MAP_NULL
 };
 
-static int m_pipe(int, int, char *);
-static int m_exec(int, int, char *);
+static int m_pipe(int, int, char *, struct seq *);
+static int m_exec(int, int, char *, struct seq *);
 
 static int cmd_pipe(char *[], char *, size_t, char **, size_t *, char **, size_t *);
 static int cmd_pipesh(char *, char *, size_t, char **, size_t *, char **, size_t *);
+
+static int ex_command(char *, struct seq *);
 
 static void
 sbuf_extend(struct sbuf *sb, int newsz)
@@ -390,6 +390,23 @@ seq_read(struct seq *sq, int argc, char *argv[])
 		blaze822_loop(argc, argv, addcb);
 }
 
+static void
+seq_collect(struct seq *sq, char *buf, ssize_t len)
+{
+	temp_seq = sq;
+	if (!sq->mails)
+		if (!(sq->mails = calloc(sizeof (struct mail), mailalloc)))
+			exit(-1);
+
+	char *p = buf, *d;
+	while (p < buf+len && (d = strchr(p, '\n'))) {
+		*d = '\0';
+		addcb(p);
+		fprintf(stderr, "seq_collect: %s\n", p);
+		p = d+1;
+	}
+}
+
 static struct mail *
 seq_get(struct seq *sq, int i)
 {
@@ -479,7 +496,6 @@ seq_parent(struct seq *sq, int start)
 		if (seq_get(sq, i)->depth < maxdepth)
 			break;
 	}
-ret:
 	return i;
 }
 
@@ -1028,10 +1044,14 @@ ec_exec(struct exarg *arg)
 
 	/* term_pos(xrows, 0); */
 	/* term_str("\n"); */
-	r = m_pipe(arg->r1, arg->r2, arg->args);
+	r = m_pipe(arg->r1, arg->r2, arg->args, arg->sq);
+	/* r = m_exec(arg->r1, arg->r2, arg->args, arg->sq); */
+
+	// everything is part of the exec command
+	arg->args += strlen(arg->args);
 
 	printed++;
-	/* mod = 1; */
+	mod = 1;
 	return r;
 }
 
@@ -1103,8 +1123,11 @@ ec_glob(struct exarg *arg)
 		return 1;
 	fprintf(stderr, "parsepattern: buf=%s l=%d\n", buf, l);
 
-	char *input;
-	size_t inlen;
+	// skip the pattern for next command
+	arg->args += l+1;
+
+	char *input, *output;
+	size_t inlen, outlen;
 
 	if ((inlen = seq_buf(&main_seq, &input, r1, r2)) < 0)
 		return 1;
@@ -1119,18 +1142,23 @@ ec_glob(struct exarg *arg)
 	argv[r++] = buf;
 	argv[r++] = (void*)0;
 
-	term_pos(xrows, 0);
-	term_done();
-	r = cmd_pipe(argv, input, inlen, 0, 0, 0, 0);
-	printed++;
-	term_init();
+	/* term_pos(xrows, 0); */
+	/* term_done(); */
+	r = cmd_pipe(argv, input, inlen, &output, &outlen, 0, 0);
+	/* printed++; */
+	/* term_init(); */
+	fprintf(stderr, "ec_glob: r=%d outlen=%d\n", r, outlen);
+	seq_collect(&grep_seq, output, outlen);
 
-	return r;
+	arg->sq = &grep_seq;
+
+	return 0;
 }
 
 static int
 ec_grep(struct exarg *arg)
 {
+	(void)arg;
 	return 0;
 }
 
@@ -1170,7 +1198,7 @@ ec_print(struct exarg *arg)
 	int i;
 	struct mail *m;
 	for (i = r1; i <= r2; i++) {
-		if (!(m = seq_get(&main_seq, i)))
+		if (!(m = seq_get(arg->sq, i)))
 			continue;
 		ex_print(m->file);
 	}
@@ -1222,7 +1250,7 @@ ec_mark(struct exarg *arg)
 }
 
 static int
-ex_command(char *s)
+ex_command(char *s, struct seq *sq)
 {
 	char buf[128];
 	struct exarg arg;
@@ -1232,14 +1260,15 @@ ex_command(char *s)
 
 	fprintf(stderr, "ex_command: %s\n", s);
 
+	arg.sq = sq;
 	ret = 1;
 	p = s;
 
 	while (1) {
 		r1 = r2 = 0;
-		p += seq_mmsg(&main_seq, p, &r1, &r2);
-		arg.r1 = r1 ? MIN(MAX(r1, 1), main_seq.num) : 0;
-		arg.r2 = r2 ? MIN(MAX(r2, 1), main_seq.num) : 0;
+		p += seq_mmsg(sq, p, &r1, &r2);
+		arg.r1 = r1 ? MIN(MAX(r1, 1), sq->num) : 0;
+		arg.r2 = r2 ? MIN(MAX(r2, 1), sq->num) : 0;
 
 		// move p1 to the beginning of arguments
 		p1 = p;
@@ -1269,7 +1298,9 @@ ex_command(char *s)
 				break;
 			}
 		}
-		break;
+		if (strlen(arg.args) == 0)
+			break;
+		p = arg.args;
 	}
 
 ret:
@@ -1284,9 +1315,9 @@ static int search_dir;
 static int
 vi_search(int c, int prompt, int dir, int cnt)
 {
+#if 0
 	int i, j;
 	int res = nrow;
-#if 0
 	if (prompt) {
 		char sign[2] = { c, 0 };
 		char *kw = vi_prompt(sign, 0);
@@ -1349,18 +1380,18 @@ vi_prefix()
 }
 
 static int
-m_exec(int r1, int r2, char *cmd)
+m_exec(int r1, int r2, char *cmd, struct seq *sq)
 {
-	int i, r;
-	char *input;
 	size_t inlen;
+	int r;
+	char *input;
 
 	r = 0;
 
 	term_pos(xrows, 0);
 	term_done();
 
-	inlen = seq_buf(&main_seq, &input, r1, r2);
+	inlen = seq_buf(sq, &input, r1, r2);
 	r = cmd_pipesh(cmd, input, inlen, 0, 0, 0, 0);
 
 	printed += 2;
@@ -1369,7 +1400,7 @@ m_exec(int r1, int r2, char *cmd)
 }
 
 static int
-m_pipe(int r1, int r2, char *cmd)
+m_pipe(int r1, int r2, char *cmd, struct seq *sq)
 {
 	size_t inlen, outlen, errlen;
 	int i, r;
@@ -1380,11 +1411,11 @@ m_pipe(int r1, int r2, char *cmd)
 
 	fprintf(stderr, "mpipe r1=%d r2=%d\n", r1, r2);
 
-	inlen = seq_buf(&main_seq, &input, r1, r2);
+	inlen = seq_buf(sq, &input, r1, r2);
 
 	fprintf(stderr, "mpipe >\n %s\n", input);
 
-	cmd_pipesh(cmd, input, inlen, &output, &outlen, &error, &errlen);
+	r = cmd_pipesh(cmd, input, inlen, &output, &outlen, &error, &errlen);
 
 	fprintf(stderr, "mpipe <\n %s\n", output);
 
@@ -1392,7 +1423,7 @@ m_pipe(int r1, int r2, char *cmd)
 	char *p = output, *d;
 	while (p < output+outlen && (d = strchr(p, '\n'))) {
 		*d = '\0';
-		if ((m = seq_get(&main_seq, i))) {
+		if ((m = seq_get(sq, i))) {
 			fprintf(stderr, "old=%s\n", m->file);
 			fprintf(stderr, "new=%s\n", p);
 			free(m->file);
@@ -1401,7 +1432,7 @@ m_pipe(int r1, int r2, char *cmd)
 		i++;
 		p = d+1;
 	}
-	seq_scan(&main_seq, r1, r2);
+	seq_scan(sq, r1, r2);
 	return r;
 }
 
@@ -1430,7 +1461,7 @@ draw_row(int row)
 	if (s) {
 		int i = strlen(s)+nlen;
 		if (i > cols) {
-			char *st = strndup(s, i-nlen);
+			char *st = strndup(s, i-nlen-3);
 			term_str(st);
 			free(st);
 		} else {
@@ -1538,10 +1569,12 @@ ui_excmd(KeyArg *karg, void *arg)
 {
 	char *cmd;
 	int r;
+	(void)karg;
+	(void)arg;
 	r = 1;
 	cmd = vi_prompt(":", 0);
 	if (cmd)
-		r = ex_command(cmd);
+		r = ex_command(cmd, &main_seq);
 	free(cmd);
 	mod = 1;
 	return r;
@@ -1564,6 +1597,7 @@ static int
 ui_move(KeyArg *karg, void *arg)
 {
 	int cnt;
+	(void)karg;
 	nrow = *((int *)arg);
 	mv = 1;
 	if (nrow != -1) return 0;
@@ -1604,6 +1638,8 @@ ui_scroll(KeyArg *karg, void *arg)
 static int
 ui_mark(KeyArg *karg, void *arg)
 {
+	(void)karg;
+	(void)arg;
 	return setmark(vi_read(), nrow);
 }
 
@@ -1611,6 +1647,8 @@ static int
 ui_jumpmark(KeyArg *karg, void *arg)
 {
 	int i, pos;
+	(void)karg;
+	(void)arg;
 	if ((i = markidx(vi_read())) < 0)
 		return 1;
 	if ((pos = marks[i].num) < 0) {
@@ -1659,7 +1697,7 @@ match_tree(KeyNode *node, KeyArg *arg)
 		switch (n->t) {
 		case MAP_CMD:
 			for (j = 0; j < cnt; j++)
-				if ((r = ex_command(n->cmd)))
+				if ((r = ex_command(n->cmd, &main_seq)))
 					break;
 			break;
 		case MAP_FN:
@@ -1685,7 +1723,7 @@ doop:
 			case MAP_CMD:
 				// XXX: wew range to string just to convert it back, need a better solution
 				snprintf(buf, sizeof buf, "%d:%d%s", r1, r2, n->cmd);
-				return ex_command(buf);
+				return ex_command(buf, &main_seq);
 			case MAP_FN:
 				return n->fn(arg, (void *)&n->arg);
 			default:
@@ -1700,6 +1738,9 @@ doop:
 static int
 vi(int argc, char *argv[])
 {
+	(void)argc;
+	(void)argv;
+
 	term_init();
 	seq_scan(&main_seq, 0, 0);
 
@@ -1762,6 +1803,8 @@ vi(int argc, char *argv[])
 static int
 ex(int argc, char *argv[])
 {
+	(void)argc;
+	(void)argv;
 	term_init();
 	while (!quit) {
 		nrow = xrow;
@@ -1770,7 +1813,7 @@ ex(int argc, char *argv[])
 		char *cmd = ex_prompt(":", 0);
 		if (!cmd)
 			continue;
-		if (ex_command(cmd))
+		if (ex_command(cmd, &main_seq))
 			fprintf(stderr, "ex: err");
 		free(cmd);
 		if (mv)
