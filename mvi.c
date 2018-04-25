@@ -1055,7 +1055,22 @@ ec_exec(struct exarg *arg)
 static int
 ec_write(struct exarg *arg)
 {
-	fprintf(stderr, "ec_write: cmd=%s args=%s r1=%d r2=%d\n", arg->cmd, arg->args, arg->r1, arg->r2);
+	int r1, r2;
+
+	// default to current mail
+	r1 = arg->r1 ? arg->r1 : xrow+1;
+	r2 = arg->r2 ? arg->r2 : r1;
+
+	fprintf(stderr, "ec_write: cmd=%s args=%s r1=%d r2=%d\n", arg->cmd, arg->args, r1, r2);
+
+	if (arg->args && arg->args[0] == '!' && arg->args[1]) {
+		int r;
+		r = m_exec(r1, r2, arg->args+1, arg->sq);
+		// everything is part of the exec command
+		arg->args += strlen(arg->args);
+		return r;
+	}
+
 	return 0;
 }
 
