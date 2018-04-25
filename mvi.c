@@ -86,6 +86,11 @@ static int nlen;
 static int quit = 0;
 static int printed = 0;
 
+enum {
+	OPT_NUMBER = 0x00001,
+};
+static int opts = OPT_NUMBER;
+
 static char vi_msg[512];
 static int vi_arg1, vi_arg2;
 
@@ -325,6 +330,12 @@ void
 sbuf_str(struct sbuf *sb, char *src)
 {
 	sbuf_mem(sb, src, strlen(src));
+}
+
+void
+sbuf_strn(struct sbuf *sb, char *src, size_t n)
+{
+	sbuf_mem(sb, src, n);
 }
 
 size_t
@@ -798,13 +809,26 @@ term_chr(char c)
 }
 
 static void
-term_str(char *s)
+term_mem(char *s, size_t n)
 {
 	if (term_sbuf)
-		sbuf_str(term_sbuf, s);
+		sbuf_mem(term_sbuf, s, n);
 	else
-		while (write(1, s, strlen(s)) < 0 && errno == EAGAIN)
+		while (write(1, s, n) < 0 && errno == EAGAIN)
 			;
+}
+
+static void
+term_strn(char *s, size_t max)
+{
+	size_t len = strlen(s);
+	term_mem(s, len > max ? max : len);
+}
+
+static void
+term_str(char *s)
+{
+	term_mem(s, strlen(s));
 }
 
 static void
@@ -1450,42 +1474,39 @@ m_pipe(int r1, int r2, char *cmd, struct seq *sq)
 }
 
 void
-draw_row(int row)
+draw_row(unsigned int row)
 {
 	struct mail *m;
-	char *s;
+	char *s = NULL;
 
-	s = 0;
 	if ((m = seq_get(&main_seq, row+1)))
 		s = m->scan;
 
-	/* fprintf(stderr, "draw_row row=%d xrow=%d\n", row, xrow); */
-
 	term_pos(row - xtop, 0);
 	term_kill();
-	if (1 && s) {// draw numbers
-		char buf[128];
-		snprintf(buf, 128, "%*d ", nlen, row+1);
-		term_str(buf);
-	}
-	if (row == xrow) {
+
+	if (row == xrow)
 		term_str("\33[0;32m");
-	}
+
 	if (s) {
-		int i = strlen(s)+nlen;
-		if (i > cols) {
-			char *st = strndup(s, i-nlen-3);
-			term_str(st);
-			free(st);
-		} else {
-			term_str(s);
+		int maxlen = cols;
+		if (opts & OPT_NUMBER) { // draw numbers
+			char buf[12];
+			size_t len;
+			len = snprintf(buf, sizeof buf, "%*u ", nlen, row+1);
+			if (len < 0)
+				goto err;
+			term_strn(buf, len);
+			maxlen -= nlen+1;
 		}
+		term_strn(s, maxlen);
 	} else {
-		term_str("~");
+		term_chr('~');
 	}
-	if (row == xrow) {
+
+err:
+	if (row == xrow)
 		term_str("\33[0m");
-	}
 }
 
 void
