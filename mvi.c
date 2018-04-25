@@ -209,6 +209,7 @@ static KeyNode keytree[] = {
 	MAP_CMD('^', KEY_MOTION, "^"),
 	MAP_CMD('_', KEY_MOTION, "_"),
 	MAP_CMD('p', KEY_OP, "w !mshow"),
+	MAP_CMD('P', 0, "w !mshow"),
 	MAP_CMD('d', KEY_OP, "!mflag -vS"),
 	MAP_CMD('u', KEY_OP, "!mflag -vs"),
 	MAP_CMD('t', KEY_OP, "!mflag -vt"),
