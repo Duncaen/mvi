@@ -440,7 +440,7 @@ seq_scan(struct seq *seq, int r1, int r2)
 	char *input, *output, *error;
 	size_t inlen, outlen, errlen;
 
-	inlen = seq_buf(&main_seq, &input, r1, r2);
+	inlen = seq_buf(seq, &input, r1, r2);
 	cmd_pipe(mscan_argv, input, inlen, &output, &outlen, &error, &errlen);
 
 	i = r1 ? r1-1 : 0;
@@ -1043,16 +1043,12 @@ ec_exec(struct exarg *arg)
 
 	fprintf(stderr, "ec_exec: cmd=%s args=%s r1=%d r2=%d\n", arg->cmd, arg->args, arg->r1, arg->r2);
 
-	/* term_pos(xrows, 0); */
-	/* term_str("\n"); */
-	r = m_pipe(arg->r1, arg->r2, arg->args, arg->sq);
-	/* r = m_exec(arg->r1, arg->r2, arg->args, arg->sq); */
+	/* r = m_pipe(arg->r1, arg->r2, arg->args, arg->sq); */
+	r = m_exec(arg->r1, arg->r2, arg->args, arg->sq);
 
 	// everything is part of the exec command
 	arg->args += strlen(arg->args);
 
-	printed++;
-	mod = 1;
 	return r;
 }
 
@@ -1396,6 +1392,7 @@ m_exec(int r1, int r2, char *cmd, struct seq *sq)
 	r = cmd_pipesh(cmd, input, inlen, 0, 0, 0, 0);
 
 	printed += 2;
+	mod = 1;
 	term_init();
 	return r;
 }
