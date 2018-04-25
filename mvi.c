@@ -68,7 +68,8 @@ static struct seq grep_seq;
 static struct seq search_seq;
 static struct seq *temp_seq;
 
-static struct termios termios;
+static struct termios termdef;
+static struct termios termraw;
 static struct sbuf *term_sbuf;
 static int cols;
 static int rows;
@@ -83,6 +84,7 @@ static int mv;
 
 static int nlen;
 
+static int resize = 0;
 static int quit = 0;
 static int printed = 0;
 
@@ -226,6 +228,7 @@ static KeyNode keytree[] = {
 		MAP_FUN('g', KEY_MOTION, ui_move, 0),
 		MAP_NULL
 	),
+	MAP_CMD('\r', KEY_MOTION, "+"),
 	MAP_CMD(TK_CTL('n'), KEY_MOTION, "+"),
 	MAP_CMD(TK_CTL('p'), KEY_MOTION, "-"),
 	MAP_FUN(':', 0, ui_excmd, {0}),
@@ -267,6 +270,13 @@ static int cmd_pipe(char *[], char *, size_t, char **, size_t *, char **, size_t
 static int cmd_pipesh(char *, char *, size_t, char **, size_t *, char **, size_t *);
 
 static int ex_command(char *, struct seq *);
+
+static int
+sig_winch(int signo)
+{
+	(void) signo;
+	resize++;
+}
 
 static void
 sbuf_extend(struct sbuf *sb, int newsz)
@@ -865,17 +875,9 @@ term_pos(int r, int c)
 }
 
 void
-term_init()
+term_resize()
 {
 	struct winsize w;
-	struct termios newtermios;
-
-	tcgetattr(0, &termios);
-	newtermios = termios;
-	newtermios.c_lflag &= ~(ICANON | ISIG);
-	newtermios.c_lflag &= ~ECHO;
-	tcsetattr(0, TCSAFLUSH, &newtermios);
-
 	if (getenv("LINES"))
 		rows = atoi(getenv("LINES"));
 	if (getenv("COLUMNS"))
@@ -884,29 +886,44 @@ term_init()
 		cols = w.ws_col;
 		rows = w.ws_row;
 	}
-
 	cols = cols ? cols : 80;
 	rows = rows ? rows : 25;
 
-	term_str("\33[m");
-
-	char str[128];
-	sprintf(str, "%d", cols);
+	char str[12];
+	sprintf(str, "%u", cols);
 	setenv("COLUMNS", str, 0);
-	sprintf(str, "%d", rows);
+	sprintf(str, "%u", rows);
 	setenv("LINES", str, 0);
 }
 
 void
-term_done()
+term_init()
 {
-	tcsetattr(0, 0, &termios);
+	tcgetattr(0, &termdef);
+	termraw = termdef;
+	termraw.c_iflag &= ~(ICRNL | IXON);
+	termraw.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+	termraw.c_oflag &= ~(OPOST);
+	term_str("\33[m");
+	term_resize();
+}
+
+void
+term_raw()
+{
+	tcsetattr(0, TCSAFLUSH, &termraw);
+}
+
+void
+term_default()
+{
+	tcsetattr(0, 0, &termdef);
 }
 
 void
 term_suspend()
 {
-	term_done();
+	term_default();
 	kill(getpid(), SIGTSTP);
 	term_init();
 }
@@ -1006,17 +1023,17 @@ prompt(char *msg, int *kbmap)
 			cmd[cmd_len] = '\0';
 			break;
 		default:
-			if (c == '\n' || TK_INT(c))
+			if (c == '\r' || TK_INT(c))
 				break;
 			cmd[cmd_len++] = c;
 			cmd[cmd_len] = '\0';
 			break;
 		}
-		if (c == '\n' || TK_INT(c))
+		if (c == '\r' || TK_INT(c))
 			break;
 	}
 
-	if (c == '\n')
+	if (c == '\r')
 		return cmd;
 
 	free(cmd);
@@ -1425,14 +1442,16 @@ m_exec(int r1, int r2, char *cmd, struct seq *sq)
 	r = 0;
 
 	term_pos(xrows, 0);
-	term_done();
+	term_default();
 
 	inlen = seq_buf(sq, &input, r1, r2);
 	r = cmd_pipesh(cmd, input, inlen, 0, 0, 0, 0);
 
 	printed += 2;
 	mod = 1;
-	term_init();
+
+	term_raw();
+
 	return r;
 }
 
@@ -1517,7 +1536,7 @@ vi_wait()
 		term_pos(xrows, 0);
 		term_kill();
 		term_str("[enter to continue]");
-		while ((c = vi_read()) != '\n' && !TK_INT(c))
+		while ((c = vi_read()) != '\r' && !TK_INT(c))
 			;
 		vi_msg[0] = '\0';
 	}
@@ -1775,7 +1794,10 @@ vi(int argc, char *argv[])
 	(void)argc;
 	(void)argv;
 
+	signal(SIGWINCH, sig_winch);
+
 	term_init();
+	term_raw();
 	seq_scan(&main_seq, 0, 0);
 
 	xtop = MAX(0, xrow - xrows / 2);
@@ -1800,6 +1822,12 @@ vi(int argc, char *argv[])
 		if (!match_tree(keytree, &karg)) {
 			if (mv) xrow = nrow;
 			/* mod = 1; */
+		}
+
+		if (resize) {
+			term_resize();
+			mod = 1;
+			resize = 0;
 		}
 
 		if (xrow < 0 || xrow >= main_seq.num)
@@ -1830,7 +1858,7 @@ vi(int argc, char *argv[])
 
 	term_pos(xrows, 0);
 	term_kill();
-	term_done();
+	term_default();
 	return 0;
 }
 
@@ -1840,6 +1868,7 @@ ex(int argc, char *argv[])
 	(void)argc;
 	(void)argv;
 	term_init();
+	term_raw();
 	while (!quit) {
 		nrow = xrow;
 		orow = xrow;
@@ -1856,7 +1885,7 @@ ex(int argc, char *argv[])
 			xrow = main_seq.num ? main_seq.num - 1 : 0;
 	}
 	term_kill();
-	term_done();
+	term_default();
 	return 0;
 }
 
