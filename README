@@ -1,0 +1,134 @@
+MVI(1)                      General Commands Manual                     MVI(1)
+
+NAME
+     mvi  vi-like mail interface
+
+DESCRIPTION
+     mvi is nice.
+
+VI COMMANDS
+     The follwing commands are available in normal mode.
+
+     [n] <control-B>
+             Move n pages backwards.
+
+     [n] <control-E>
+             Scroll n lines forwards.
+
+     [n] <control-F>
+             Move n pages forwards.
+
+     [n] <control-Y>
+             Scroll n lines backwards.
+
+     [n] <enter>
+
+     [n] +
+
+     [n] j   Move the cursor n lines down.
+
+     [n] -
+
+     [n] k   Move the cursor n lines up.
+
+     <escape>
+             Return into default mode.
+
+     [n] G   Move to mail n or the last mail if n is not specified.
+
+     [n] [[  Move n times to the next parent message.
+
+     [n] ]]  Move n times to the next child message.
+
+     [n] (   Todo n.
+
+     [n] )   Todo n.
+
+     [n] {   Move n threads backward.
+
+     [n] }   Move n threads forward.
+
+     [n] ^   Move n parent mails up.
+
+     _       Move to the end of the current thread.
+
+     m [a-zA-Z]
+             Mark the current line as character [a-zA-Z].
+
+     ` [a-zA-Z]
+
+     ' [a-zA-Z]
+             Return to the line marked as character [a-zA-Z].
+
+     [n] p [motion]
+             Print n mails in the motion
+
+     P       Print the current mail.
+
+VI TEXT INPUT COMMANDS
+     The following key bindings are available in the text input mode.
+
+     <erase>
+
+     <control-H>
+             Erase the last character.
+
+     <escape>
+             Return to command mode.
+
+     <control-W>
+             Erase the last word.
+
+     <control-U>
+             Erase entire input line.
+
+EX COMMANDS
+     The following sections describes ex commands, where the headline is the
+     usage synposis of the command with a description following.
+
+     !cmd [args...]
+             Execute a shell command.
+
+     q[uit][!]
+             Exit.
+
+     =       Output the current line number.
+
+     [msgs] ma[rk] [a-zA-Z]
+             Mark the current or last message in msgs as character [a-zA-Z].
+
+     [msgs] p[rint]
+             Print the current or all lines in msgs.
+
+     [msgs] g[lobal] /header:regex/ [commands]
+
+     [msgs] v /header:regex/ [commands]
+             Run commands on all or messages in msgs matching (or in case of v
+             not matching) regex.  See magrep(1) for the header and pattern
+             syntax.
+
+     [msgs]  Move to last message in msgs.
+
+     See mmsg(7) for the message argument syntax (msgs) for many of the
+     commands.  Additionally mvi supports the following msgs shortcuts:
+
+     %  refers all messages (like 1:$).
+
+EXIT STATUS
+     The mvi utility exits0 on success, and>0 if an error occurs.
+
+SEE ALSO
+     ed(1), neatvi(1), vi(1), vim(1)
+
+AUTHORS
+     Duncan Overbruck <mail@duncano.de>
+
+LICENSE
+     mvi is in the public domain.
+
+     To the extent possible under law, the creator of this work has waived all
+     copyright and related or neighboring rights to this work.
+
+           http://creativecommons.org/publicdomain/zero/1.0/
+
+Void Linux                       July 22, 2016                      Void Linux
